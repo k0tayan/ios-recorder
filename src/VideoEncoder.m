@@ -26,7 +26,6 @@ static void vreclog(const char *fmt, ...) {
 @property (nonatomic) int fps;
 @property (nonatomic) int bitrate;
 @property (nonatomic, readwrite) BOOL isRunning;
-@property (nonatomic) dispatch_queue_t encoderQueue;
 @property (nonatomic) int64_t encodeCount;
 @property (nonatomic) int64_t outputCount;
 @end
@@ -70,7 +69,6 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
         _fps = fps;
         _bitrate = bitrate;
         _isRunning = NO;
-        _encoderQueue = dispatch_queue_create("com.local.iosrecorder.videoencoder", DISPATCH_QUEUE_SERIAL);
     }
     return self;
 }
@@ -158,23 +156,26 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
         return;
     }
 
-    CVPixelBufferRetain(pixelBuffer);
     CMTime frameDuration = CMTimeMake(1, self.fps);
     int64_t frameNum = ++self.encodeCount;
-    dispatch_async(self.encoderQueue, ^{
-        if (self.session) {
-            VTCompressionSessionEncodeFrame(self.session,
-                                             pixelBuffer,
-                                             timestamp,
-                                             frameDuration,
-                                             NULL, NULL, NULL);
-            // Log every 100th submitted frame
-            if (frameNum % 100 == 1) {
-                vreclog("VT_IN  #%lld pts=%.3f", (long long)frameNum, CMTimeGetSeconds(timestamp));
-            }
-        }
-        CVPixelBufferRelease(pixelBuffer);
-    });
+
+    // Encode directly on the calling thread (game render thread).
+    // The previous dispatch_async approach caused the serial queue to fall
+    // behind at 120fps, building a multi-second backlog.  By the time the
+    // encoder read the IOSurface-backed pixel buffer, Metal had already
+    // reused the surface for newer frames — the encoded video showed future
+    // content while PTS referenced the past, making audio appear to lag.
+    // Calling VTCompressionSessionEncodeFrame inline ensures the hardware
+    // encoder reads the IOSurface before Metal can overwrite it.
+    VTCompressionSessionEncodeFrame(self.session,
+                                     pixelBuffer,
+                                     timestamp,
+                                     frameDuration,
+                                     NULL, NULL, NULL);
+
+    if (frameNum % 100 == 1) {
+        vreclog("VT_IN  #%lld pts=%.3f", (long long)frameNum, CMTimeGetSeconds(timestamp));
+    }
 }
 
 - (void)stopWithCompletion:(void (^)(void))completion {
@@ -183,25 +184,25 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
         return;
     }
 
-    // Set isRunning = NO INSIDE the queue block so that previously queued
-    // encode blocks still submit their frames to VT before we flush.
-    // (Previous bug: setting it here on the main thread caused queued
-    //  encode blocks to skip, losing ~0.8s of video at the end.)
-    dispatch_async(self.encoderQueue, ^{
-        self.isRunning = NO;
-        if (self.session) {
-            VTCompressionSessionCompleteFrames(self.session, kCMTimeInvalid);
-            VTCompressionSessionInvalidate(self.session);
-            CFRelease(self.session);
-            self.session = NULL;
-        }
-        vreclog("STOP submitted=%lld encoded=%lld", (long long)self.encodeCount, (long long)self.outputCount);
-        NSLog(@"[Recorder] VideoEncoder stopped (submitted=%lld encoded=%lld)",
-              (long long)self.encodeCount, (long long)self.outputCount);
-        if (completion) {
-            dispatch_async(dispatch_get_main_queue(), completion);
-        }
-    });
+    // No encode queue backlog to drain — encodes happen inline on the render
+    // thread, so we can flush and tear down immediately.
+    self.isRunning = NO;
+
+    if (self.session) {
+        // Wait for any in-flight hardware encodes to finish
+        VTCompressionSessionCompleteFrames(self.session, kCMTimeInvalid);
+        VTCompressionSessionInvalidate(self.session);
+        CFRelease(self.session);
+        self.session = NULL;
+    }
+
+    vreclog("STOP submitted=%lld encoded=%lld", (long long)self.encodeCount, (long long)self.outputCount);
+    NSLog(@"[Recorder] VideoEncoder stopped (submitted=%lld encoded=%lld)",
+          (long long)self.encodeCount, (long long)self.outputCount);
+
+    if (completion) {
+        dispatch_async(dispatch_get_main_queue(), completion);
+    }
 }
 
 - (void)dealloc {

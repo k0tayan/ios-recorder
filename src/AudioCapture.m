@@ -24,7 +24,7 @@ static void reclog(const char *fmt, ...) {
 }
 
 // ─── Lock-free SPSC ring buffer (RT thread → drain thread) ─────────
-#define RING_SLOT_COUNT   64
+#define RING_SLOT_COUNT   256
 #define SLOT_MAX_BYTES    32768          // 2048 frames × 4 ch × sizeof(Float32)
 #define SLOT_MAX_BUFS     2
 
@@ -65,6 +65,8 @@ static atomic_uint_fast64_t sCallbackCount;        // total render callback invo
 static atomic_uint_fast64_t sCapturedCount;        // callbacks that passed the filter
 static atomic_uint_fast64_t sCapturedFrames;       // total audio frames captured
 static atomic_uint_fast64_t sSkippedNullCbCount;   // callbacks skipped due to NULL origCallback
+static atomic_uint_fast64_t sRingDropCount;        // callbacks dropped due to ring buffer full
+static atomic_uint_fast64_t sRingDropFrames;       // audio frames lost to ring buffer overflow
 
 // ─── RT-safe render callback wrapper ────────────────────────────────
 //
@@ -106,19 +108,22 @@ static OSStatus renderCallbackWrapper(void *inRefCon,
     if (!atomic_load_explicit(&sCapturing, memory_order_acquire)) return status;
     if (status != noErr || !ioData) return status;
 
-    // 4. Stats (relaxed — for diagnostics only)
+    // 4. Check ring buffer space (single producer — no CAS needed)
+    int wi   = atomic_load_explicit(&sWriteIdx, memory_order_relaxed);
+    int next = (wi + 1) % RING_SLOT_COUNT;
+    if (next == atomic_load_explicit(&sReadIdx, memory_order_acquire)) {
+        // Ring full — drop this callback and record the loss
+        atomic_fetch_add_explicit(&sRingDropCount, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&sRingDropFrames, inNumberFrames, memory_order_relaxed);
+        return status;
+    }
+
+    // 5. Stats (relaxed — for diagnostics only, counted AFTER drop check)
     atomic_fetch_add_explicit(&sCallbackCount, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&sCapturedCount, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&sCapturedFrames, inNumberFrames, memory_order_relaxed);
 
-    // 3. Check ring buffer space (single producer — no CAS needed)
-    int wi   = atomic_load_explicit(&sWriteIdx, memory_order_relaxed);
-    int next = (wi + 1) % RING_SLOT_COUNT;
-    if (next == atomic_load_explicit(&sReadIdx, memory_order_acquire)) {
-        return status;  // ring full — drop this callback
-    }
-
-    // 4. Copy every AudioBuffer into the slot
+    // 6. Copy every AudioBuffer into the slot
     CaptureSlot *slot = &sSlots[wi];
     UInt32 numBufs = ioData->mNumberBuffers;
     if (numBufs > SLOT_MAX_BUFS) numBufs = SLOT_MAX_BUFS;
@@ -138,7 +143,7 @@ static OSStatus renderCallbackWrapper(void *inRefCon,
     slot->captureTime = mach_absolute_time();
     slot->formatGen   = atomic_load_explicit(&sFormatGeneration, memory_order_relaxed);
 
-    // 5. Release-store: slot contents are visible before the index update
+    // 7. Release-store: slot contents are visible before the index update
     atomic_store_explicit(&sWriteIdx, next, memory_order_release);
 
     return status;
@@ -291,6 +296,8 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
         atomic_store_explicit(&sCapturedCount, 0, memory_order_relaxed);
         atomic_store_explicit(&sCapturedFrames, 0, memory_order_relaxed);
         atomic_store_explicit(&sSkippedNullCbCount, 0, memory_order_relaxed);
+        atomic_store_explicit(&sRingDropCount, 0, memory_order_relaxed);
+        atomic_store_explicit(&sRingDropFrames, 0, memory_order_relaxed);
         self.drainSlotCount = 0;
         self.drainFrameCount = 0;
         // Force format re-detection on first slot by setting to impossible value
@@ -302,11 +309,19 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
     } else {
         atomic_store_explicit(&sCapturing, false, memory_order_release);
         [self _stopDrainTimer];   // flushes remaining slots
-        reclog("STOP callbacks=%llu captured=%llu frames=%llu skippedNull=%llu",
+        uint64_t dropCount  = atomic_load(&sRingDropCount);
+        uint64_t dropFrames = atomic_load(&sRingDropFrames);
+        reclog("STOP callbacks=%llu captured=%llu frames=%llu skippedNull=%llu ringDrops=%llu droppedFrames=%llu",
                (unsigned long long)atomic_load(&sCallbackCount),
                (unsigned long long)atomic_load(&sCapturedCount),
                (unsigned long long)atomic_load(&sCapturedFrames),
-               (unsigned long long)atomic_load(&sSkippedNullCbCount));
+               (unsigned long long)atomic_load(&sSkippedNullCbCount),
+               (unsigned long long)dropCount,
+               (unsigned long long)dropFrames);
+        if (dropCount > 0) {
+            NSLog(@"[Recorder] WARNING: %llu audio callbacks dropped (%llu frames lost) due to ring buffer overflow",
+                  (unsigned long long)dropCount, (unsigned long long)dropFrames);
+        }
     }
 }
 
@@ -342,8 +357,10 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
 #pragma mark - Drain timer
 
 - (void)_startDrainTimer {
+    dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(
+        DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
     self.drainQueue = dispatch_queue_create(
-        "com.local.iosrecorder.audiodrain", DISPATCH_QUEUE_SERIAL);
+        "com.local.iosrecorder.audiodrain", attr);
 
     self.drainTimer = dispatch_source_create(
         DISPATCH_SOURCE_TYPE_TIMER, 0, 0, self.drainQueue);
