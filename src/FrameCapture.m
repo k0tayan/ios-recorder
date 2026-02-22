@@ -1,5 +1,4 @@
 #import "FrameCapture.h"
-#import "UnityTime.h"
 #import <IOSurface/IOSurfaceRef.h>
 #import <mach/mach_time.h>
 #import <objc/message.h>
@@ -102,12 +101,9 @@ typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
             return;
         }
 
-        // Calculate PTS using Unity timeline (preferred) or wall-clock fallback
-        CMTime pts = [UnityTime videoPTS];
-        if (CMTIME_IS_INVALID(pts)) {
-            CMTime currentTime = CMClockGetTime(CMClockGetHostTimeClock());
-            pts = self.startTimeSet ? CMTimeSubtract(currentTime, self.recordingStartTime) : kCMTimeZero;
-        }
+        // Calculate PTS from monotonic host clock (same timebase as audio)
+        CMTime currentTime = CMClockMakeHostTimeFromSystemUnits(now);
+        CMTime pts = self.startTimeSet ? CMTimeSubtract(currentTime, self.recordingStartTime) : kCMTimeZero;
 
         // Notify delegate
         [self.delegate frameCapture:self didCapturePixelBuffer:pixelBuffer timestamp:pts];

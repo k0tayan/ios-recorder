@@ -151,9 +151,16 @@
 
     CFRetain(sampleBuffer);
     dispatch_async(self.muxerQueue, ^{
-        if (self.writer.status != AVAssetWriterStatusWriting || !self.sessionStarted) {
+        if (self.writer.status != AVAssetWriterStatusWriting) {
             CFRelease(sampleBuffer);
             return;
+        }
+
+        // Start session from audio if it arrives before video
+        if (!self.sessionStarted) {
+            CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
+            [self.writer startSessionAtSourceTime:pts];
+            self.sessionStarted = YES;
         }
 
         if (self.audioInput.isReadyForMoreMediaData) {

@@ -1,4 +1,23 @@
 #import "VideoEncoder.h"
+#include <sys/time.h>
+
+// ─── File-based debug logging (shared log file with AudioCapture) ──
+static FILE *sVideoLogFile = NULL;
+
+static void vreclog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void vreclog(const char *fmt, ...) {
+    if (!sVideoLogFile) {
+        NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"iosrecorder_video.log"];
+        sVideoLogFile = fopen(tmp.UTF8String, "a");
+        if (sVideoLogFile) setlinebuf(sVideoLogFile);
+    }
+    if (!sVideoLogFile) return;
+    struct timeval tv; gettimeofday(&tv, NULL);
+    struct tm t; localtime_r(&tv.tv_sec, &t);
+    fprintf(sVideoLogFile, "%02d:%02d:%02d.%03d ", t.tm_hour, t.tm_min, t.tm_sec, (int)(tv.tv_usec/1000));
+    va_list ap; va_start(ap, fmt); vfprintf(sVideoLogFile, fmt, ap); va_end(ap);
+    fprintf(sVideoLogFile, "\n");
+}
 
 @interface VideoEncoder ()
 @property (nonatomic) VTCompressionSessionRef session;
@@ -8,6 +27,8 @@
 @property (nonatomic) int bitrate;
 @property (nonatomic, readwrite) BOOL isRunning;
 @property (nonatomic) dispatch_queue_t encoderQueue;
+@property (nonatomic) int64_t encodeCount;
+@property (nonatomic) int64_t outputCount;
 @end
 
 static void videoEncoderOutputCallback(void *outputCallbackRefCon,
@@ -21,6 +42,14 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
     }
 
     VideoEncoder *encoder = (__bridge VideoEncoder *)outputCallbackRefCon;
+    encoder.outputCount++;
+
+    // Log every 100th output frame for PTS tracking
+    if (encoder.outputCount % 100 == 1) {
+        CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
+        vreclog("VT_OUT #%lld pts=%.3f", (long long)encoder.outputCount, CMTimeGetSeconds(pts));
+    }
+
     if (encoder.onEncodedSample) {
         CFRetain(sampleBuffer);
         encoder.onEncodedSample(sampleBuffer);
@@ -115,6 +144,9 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
     }
 
     self.isRunning = YES;
+    self.encodeCount = 0;
+    self.outputCount = 0;
+    vreclog("START %dx%d @%dfps %dbps", self.width, self.height, self.fps, self.bitrate);
     NSLog(@"[Recorder] VideoEncoder started: %dx%d @ %dfps, %dbps",
           self.width, self.height, self.fps, self.bitrate);
     return YES;
@@ -128,13 +160,18 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
 
     CVPixelBufferRetain(pixelBuffer);
     CMTime frameDuration = CMTimeMake(1, self.fps);
+    int64_t frameNum = ++self.encodeCount;
     dispatch_async(self.encoderQueue, ^{
-        if (self.isRunning && self.session) {
+        if (self.session) {
             VTCompressionSessionEncodeFrame(self.session,
                                              pixelBuffer,
                                              timestamp,
                                              frameDuration,
                                              NULL, NULL, NULL);
+            // Log every 100th submitted frame
+            if (frameNum % 100 == 1) {
+                vreclog("VT_IN  #%lld pts=%.3f", (long long)frameNum, CMTimeGetSeconds(timestamp));
+            }
         }
         CVPixelBufferRelease(pixelBuffer);
     });
@@ -146,16 +183,21 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
         return;
     }
 
-    self.isRunning = NO;
-
+    // Set isRunning = NO INSIDE the queue block so that previously queued
+    // encode blocks still submit their frames to VT before we flush.
+    // (Previous bug: setting it here on the main thread caused queued
+    //  encode blocks to skip, losing ~0.8s of video at the end.)
     dispatch_async(self.encoderQueue, ^{
+        self.isRunning = NO;
         if (self.session) {
             VTCompressionSessionCompleteFrames(self.session, kCMTimeInvalid);
             VTCompressionSessionInvalidate(self.session);
             CFRelease(self.session);
             self.session = NULL;
         }
-        NSLog(@"[Recorder] VideoEncoder stopped");
+        vreclog("STOP submitted=%lld encoded=%lld", (long long)self.encodeCount, (long long)self.outputCount);
+        NSLog(@"[Recorder] VideoEncoder stopped (submitted=%lld encoded=%lld)",
+              (long long)self.encodeCount, (long long)self.outputCount);
         if (completion) {
             dispatch_async(dispatch_get_main_queue(), completion);
         }

@@ -7,3 +7,4 @@ fridaがインストールされてるので動的解析可能。
   ⎿  /var/mobile/Containers/Data/Application/D5A71536-CF52-4E83-8887-3CCC811C67F2/tmp/ios_recorder.s
                                                                                                                                                                                                                                                                                                                                                          
 ● ソケット発見！SSHトンネル経由で接続して確認します。   
+デプロイするときにrespring不要

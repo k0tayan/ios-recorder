@@ -1,4 +1,23 @@
 #import "AudioEncoder.h"
+#include <sys/time.h>
+
+// ─── File-based debug logging ──────────────────────────────────────
+static FILE *sAEncLogFile = NULL;
+
+static void aenclog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void aenclog(const char *fmt, ...) {
+    if (!sAEncLogFile) {
+        NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"iosrecorder_aenc.log"];
+        sAEncLogFile = fopen(tmp.UTF8String, "a");
+        if (sAEncLogFile) setlinebuf(sAEncLogFile);
+    }
+    if (!sAEncLogFile) return;
+    struct timeval tv; gettimeofday(&tv, NULL);
+    struct tm t; localtime_r(&tv.tv_sec, &t);
+    fprintf(sAEncLogFile, "%02d:%02d:%02d.%03d ", t.tm_hour, t.tm_min, t.tm_sec, (int)(tv.tv_usec/1000));
+    va_list ap; va_start(ap, fmt); vfprintf(sAEncLogFile, fmt, ap); va_end(ap);
+    fprintf(sAEncLogFile, "\n");
+}
 
 @interface AudioEncoder ()
 @property (nonatomic) AudioConverterRef converter;
@@ -15,12 +34,12 @@
 @property (nonatomic) UInt32 ringBufferWritePos;
 @property (nonatomic) UInt32 ringBufferAvailable;
 
-// PTS tracking with gap-aware re-anchoring
-@property (nonatomic) int64_t totalSamplesEncoded;
-@property (nonatomic) int64_t totalSamplesReceived;
-@property (nonatomic) CMTime ptsAnchor;         // wall-clock time at anchor point
-@property (nonatomic) int64_t samplesAtAnchor;  // totalSamplesEncoded at anchor
-@property (nonatomic) BOOL ptsAnchorSet;
+// PTS tracking: anchor + frame counting
+@property (nonatomic) CMTime firstTimestamp;          // wall-clock PTS of first audio sample
+@property (nonatomic) CMTime firstWallTime;           // CMClockGetHostTimeClock at first encode (for drift measurement)
+@property (nonatomic) BOOL ptsInitialized;
+@property (nonatomic) int64_t totalFramesEncoded;     // AAC frames encoded (for PTS calculation)
+@property (nonatomic) UInt32 primingSamples;           // AAC encoder priming delay in samples
 
 // Temporary buffer for encoder input
 @property (nonatomic) uint8_t *encoderInputBuffer;
@@ -88,7 +107,6 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
         _channels = channels;
         _bitrate = bitrate;
         _isRunning = NO;
-        _totalSamplesEncoded = 0;
         _encoderQueue = dispatch_queue_create("com.local.iosrecorder.audioencoder", DISPATCH_QUEUE_SERIAL);
 
         // Ring buffer: hold up to 1 second of audio
@@ -165,16 +183,29 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
                                     NULL, &_audioFormatDescription);
     if (cookie) free(cookie);
 
+    // Query encoder priming delay (leadingFrames to be trimmed by decoder)
+    AudioConverterPrimeInfo primeInfo = {0};
+    UInt32 primeSize = sizeof(primeInfo);
+    if (AudioConverterGetProperty(_converter, kAudioConverterPrimeInfo,
+                                   &primeSize, &primeInfo) == noErr) {
+        self.primingSamples = primeInfo.leadingFrames;
+    } else {
+        self.primingSamples = 2112; // default for AAC-LC
+    }
+
     self.isRunning = YES;
-    self.totalSamplesEncoded = 0;
-    self.totalSamplesReceived = 0;
-    self.ptsAnchorSet = NO;
+    self.ptsInitialized = NO;
+    self.totalFramesEncoded = 0;
     self.ringBufferReadPos = 0;
     self.ringBufferWritePos = 0;
     self.ringBufferAvailable = 0;
 
-    NSLog(@"[Recorder] AudioEncoder started: %.0fHz, %uch, %ubps",
-          self.sampleRate, (unsigned int)self.channels, (unsigned int)self.bitrate);
+    aenclog("START %.0fHz %uch %ubps priming=%u(%.1fms)",
+            self.sampleRate, (unsigned)self.channels, (unsigned)self.bitrate,
+            (unsigned)self.primingSamples, (double)self.primingSamples / self.sampleRate * 1000.0);
+    NSLog(@"[Recorder] AudioEncoder started: %.0fHz, %uch, %ubps, priming=%u samples (%.1fms)",
+          self.sampleRate, (unsigned int)self.channels, (unsigned int)self.bitrate,
+          (unsigned)self.primingSamples, (double)self.primingSamples / self.sampleRate * 1000.0);
     return YES;
 }
 
@@ -265,8 +296,25 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
                                         NULL, &_audioFormatDescription);
         if (cookie) free(cookie);
 
-        // Re-anchor PTS
-        self.ptsAnchorSet = NO;
+        // Query priming for new converter
+        AudioConverterPrimeInfo newPrimeInfo = {0};
+        UInt32 newPrimeSize = sizeof(newPrimeInfo);
+        if (AudioConverterGetProperty(_converter, kAudioConverterPrimeInfo,
+                                       &newPrimeSize, &newPrimeInfo) == noErr) {
+            self.primingSamples = newPrimeInfo.leadingFrames;
+        }
+
+        // Log PTS state before reset to detect discontinuities
+        if (self.ptsInitialized) {
+            int64_t lastSampleOffset = (int64_t)self.totalFramesEncoded * 1024 - (int64_t)self.primingSamples;
+            double lastPTS = CMTimeGetSeconds(self.firstTimestamp) + (double)lastSampleOffset / self.sampleRate;
+            aenclog("RECONFIG ptsReset: lastPTS=%.3f firstTimestamp=%.3f totalFrames=%lld",
+                    lastPTS, CMTimeGetSeconds(self.firstTimestamp), (long long)self.totalFramesEncoded);
+        }
+
+        // Reset PTS tracking for new format
+        self.ptsInitialized = NO;
+        self.totalFramesEncoded = 0;
 
         NSLog(@"[Recorder] AudioEncoder reconfigured: %.0fHz, %uch",
               sampleRate, (unsigned)channels);
@@ -278,36 +326,24 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
               timestamp:(CMTime)timestamp {
     if (!self.isRunning) return;
 
-    // Gap-aware PTS anchoring:
-    // Check if there's a significant gap between expected and actual timestamp.
-    // This happens when AudioUnit is reconfigured (e.g. UI → rhythm game transition).
-    if (!self.ptsAnchorSet) {
-        self.ptsAnchor = timestamp;
-        self.samplesAtAnchor = self.totalSamplesEncoded;
-        self.ptsAnchorSet = YES;
-        NSLog(@"[Recorder] Audio PTS anchor set: %.3fs", CMTimeGetSeconds(timestamp));
-    } else {
-        // Where we expect to be based on continuous sample counting
-        CMTime expectedTime = CMTimeAdd(self.ptsAnchor,
-            CMTimeMake(self.totalSamplesReceived - self.samplesAtAnchor,
-                       (int32_t)self.sampleRate));
-        double drift = CMTimeGetSeconds(CMTimeSubtract(timestamp, expectedTime));
-        if (fabs(drift) > 0.05) {  // 50ms gap threshold
-            // Re-anchor: account for pending samples in ring buffer
-            int64_t pendingSamples = self.totalSamplesReceived - self.totalSamplesEncoded;
-            CMTime pendingDuration = CMTimeMake(pendingSamples, (int32_t)self.sampleRate);
-            self.ptsAnchor = CMTimeSubtract(timestamp, pendingDuration);
-            self.samplesAtAnchor = self.totalSamplesEncoded;
-            NSLog(@"[Recorder] Audio PTS re-anchored (drift=%.1fms): %.3fs",
-                  drift * 1000, CMTimeGetSeconds(timestamp));
-        }
-    }
-    self.totalSamplesReceived += numFrames;
-
     // dispatch_sync: caller's bufferList must stay valid until data is copied
     // into our ring buffer.  The drain thread blocks here briefly while the
     // encoder queue copies + encodes — this is intentional.
     dispatch_sync(self.encoderQueue, ^{
+        if (!self.ptsInitialized) {
+            self.firstTimestamp = timestamp;
+            self.firstWallTime = CMClockGetTime(CMClockGetHostTimeClock());
+            self.ptsInitialized = YES;
+            aenclog("PTS_ANCHOR first=%.4f (value=%lld timescale=%d) rate=%.0fHz ch=%u priming=%u",
+                    CMTimeGetSeconds(timestamp),
+                    (long long)timestamp.value, (int)timestamp.timescale,
+                    self.sampleRate, (unsigned)self.channels, (unsigned)self.primingSamples);
+            NSLog(@"[Recorder] Audio PTS anchor: %.4fs (value=%lld/%d), rate=%.0fHz, priming=%u",
+                  CMTimeGetSeconds(timestamp),
+                  (long long)timestamp.value, (int)timestamp.timescale,
+                  self.sampleRate, (unsigned)self.primingSamples);
+        }
+
         [self _enqueuePCM:bufferList numFrames:numFrames];
         [self _encodeAvailableFrames];
     });
@@ -382,12 +418,13 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
             break;
         }
 
-        // Create CMSampleBuffer from encoded AAC data
-        // PTS = anchor + (samplesEncoded - samplesAtAnchor) / sampleRate
-        CMTime sampleOffset = CMTimeMake(self.totalSamplesEncoded - self.samplesAtAnchor,
-                                          (int32_t)self.sampleRate);
-        CMTime pts = CMTimeAdd(self.ptsAnchor, sampleOffset);
-        self.totalSamplesEncoded += 1024;
+        // PTS = firstTimestamp + (frameIndex × 1024 − primingSamples) / sampleRate
+        // Subtracting priming compensates for the AAC encoder's priming delay so that
+        // the decoder's output aligns with the original capture time.
+        int64_t sampleOffset = (int64_t)self.totalFramesEncoded * 1024 - (int64_t)self.primingSamples;
+        CMTime pts = CMTimeAdd(self.firstTimestamp,
+            CMTimeMakeWithSeconds((double)sampleOffset / self.sampleRate, (int32_t)self.sampleRate));
+        self.totalFramesEncoded++;
 
         CMSampleBufferRef sampleBuffer = NULL;
         CMBlockBufferRef blockBuffer = NULL;
@@ -439,6 +476,16 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
         CFRelease(blockBuffer);
 
         if (status == noErr && sampleBuffer && self.onEncodedSample) {
+            // Log every 50th AAC frame (~1s intervals) for PTS tracking + drift measurement
+            if (self.totalFramesEncoded % 50 == 1) {
+                double ptsElapsed = CMTimeGetSeconds(pts) - CMTimeGetSeconds(self.firstTimestamp);
+                CMTime nowWall = CMClockGetTime(CMClockGetHostTimeClock());
+                double wallElapsed = CMTimeGetSeconds(nowWall) - CMTimeGetSeconds(self.firstWallTime);
+                double driftMs = (ptsElapsed - wallElapsed) * 1000.0;
+                aenclog("AAC #%lld pts=%.3f ptsElapsed=%.3f wallElapsed=%.3f driftMs=%.2f",
+                        (long long)self.totalFramesEncoded,
+                        CMTimeGetSeconds(pts), ptsElapsed, wallElapsed, driftMs);
+            }
             self.onEncodedSample(sampleBuffer);
         }
 

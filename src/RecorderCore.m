@@ -2,7 +2,6 @@
 #import "VideoEncoder.h"
 #import "AudioEncoder.h"
 #import "MP4Muxer.h"
-#import "UnityTime.h"
 #import <UIKit/UIKit.h>
 
 @interface RecorderCore ()
@@ -12,6 +11,7 @@
 @property (nonatomic) MP4Muxer *muxer;
 @property (nonatomic) CMTime recordingStartTime;
 @property (nonatomic) NSString *currentOutputPath;
+@property (nonatomic) int64_t videoFrameNumber;
 @end
 
 @implementation RecorderCore
@@ -30,13 +30,9 @@
     if (self) {
         _isRecording = NO;
         _targetFPS = 120;
-        _videoBitrate = 24000000;
+        _videoBitrate = 16000000;
         _audioBitrate = 128000;
         _maxCaptureSize = CGSizeMake(2048, 1536);
-
-        // Resolve Unity il2cpp time functions
-        [UnityTime setup];
-
         // Listen for background transition
         [[NSNotificationCenter defaultCenter]
             addObserverForName:UIApplicationDidEnterBackgroundNotification
@@ -100,7 +96,6 @@
     self.audioEncoder = [[AudioEncoder alloc] initWithSampleRate:audioCapture.sampleRate
                                                         channels:audioCapture.channels
                                                          bitrate:self.audioBitrate];
-
     // Initialize MP4Muxer
     self.muxer = [[MP4Muxer alloc] initWithOutputPath:self.currentOutputPath
                                                 width:width
@@ -141,21 +136,22 @@
 
     // Record start time
     self.recordingStartTime = CMClockGetTime(CMClockGetHostTimeClock());
-    [UnityTime markRecordingStart];
 
     // Configure capture components
     FrameCapture *frameCapture = [FrameCapture shared];
     frameCapture.targetFPS = self.targetFPS;
     frameCapture.delegate = self;
-    frameCapture.capturing = YES;
     [frameCapture setRecordingStartTime:self.recordingStartTime];
+    frameCapture.capturing = YES;
 
     audioCapture.delegate = self;
-    audioCapture.capturing = YES;
     [audioCapture setRecordingStartTime:self.recordingStartTime];
+    audioCapture.capturing = YES;
 
+    self.videoFrameNumber = 0;
     self.isRecording = YES;
-    NSLog(@"[Recorder] Recording started: %dx%d → %@", width, height, self.currentOutputPath);
+    NSLog(@"[Recorder] Recording started: %dx%d → %@",
+          width, height, self.currentOutputPath);
 }
 
 - (void)stopRecordingWithCompletion:(void (^)(NSString *outputPath))completion {
@@ -166,13 +162,17 @@
     }
 
     NSLog(@"[Recorder] Stopping recording...");
-    self.isRecording = NO;
 
-    // Stop capturing first (flushes remaining data to delegate), then disconnect
+    // Stop capturing first (flushes remaining data to delegate), then disconnect.
+    // IMPORTANT: keep isRecording = YES during the drain so that the delegate
+    // callbacks still forward data to the encoders.  Setting it to NO before
+    // the drain caused the final ring-buffer flush to be silently discarded.
     [FrameCapture shared].capturing = NO;
     [FrameCapture shared].delegate = nil;
-    [AudioCapture shared].capturing = NO;
+    [AudioCapture shared].capturing = NO;   // synchronous drain with isRecording still YES
     [AudioCapture shared].delegate = nil;
+
+    self.isRecording = NO;
 
     // Stop encoders, then finalize muxer
     __weak typeof(self) weakSelf = self;
@@ -282,6 +282,9 @@
     didCapturePixelBuffer:(CVPixelBufferRef)pixelBuffer
                timestamp:(CMTime)timestamp {
     if (!self.isRecording) return;
+
+    self.videoFrameNumber++;
+
     [self.videoEncoder encodePixelBuffer:pixelBuffer timestamp:timestamp];
 }
 
@@ -292,6 +295,7 @@
                numFrames:(UInt32)numFrames
                timestamp:(CMTime)timestamp {
     if (!self.isRecording) return;
+
     [self.audioEncoder encodePCMBuffer:bufferList numFrames:numFrames timestamp:timestamp];
 }
 
