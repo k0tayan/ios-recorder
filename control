@@ -1,0 +1,9 @@
+Package: com.local.iosrecorder
+Name: iOS App Recorder
+Version: 0.1.0
+Architecture: iphoneos-arm64
+Description: Record any app's screen and audio to MP4
+Maintainer: palette
+Author: palette
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000)
