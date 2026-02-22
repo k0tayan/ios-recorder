@@ -32,7 +32,7 @@
         _targetFPS = 120;
         _videoBitrate = 16000000;
         _audioBitrate = 128000;
-        _maxCaptureSize = CGSizeMake(2048, 1536);
+        _maxCaptureSize = CGSizeMake(1546, 1080);
         // Listen for background transition
         [[NSNotificationCenter defaultCenter]
             addObserverForName:UIApplicationDidEnterBackgroundNotification

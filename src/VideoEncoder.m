@@ -19,6 +19,12 @@ static void vreclog(const char *fmt, ...) {
     fprintf(sVideoLogFile, "\n");
 }
 
+// Max frames queued for async encoding.  Metal's drawable pool has ~3
+// surfaces; keeping the queue shallow ensures each IOSurface-backed pixel
+// buffer is encoded before Metal can reuse it (~25 ms at 120 Hz), while
+// almost never blocking the render thread.
+#define ENCODER_QUEUE_DEPTH 2
+
 @interface VideoEncoder ()
 @property (nonatomic) VTCompressionSessionRef session;
 @property (nonatomic) int width;
@@ -26,6 +32,8 @@ static void vreclog(const char *fmt, ...) {
 @property (nonatomic) int fps;
 @property (nonatomic) int bitrate;
 @property (nonatomic, readwrite) BOOL isRunning;
+@property (nonatomic) dispatch_queue_t encoderQueue;
+@property (nonatomic) dispatch_semaphore_t encoderSemaphore;
 @property (nonatomic) int64_t encodeCount;
 @property (nonatomic) int64_t outputCount;
 @end
@@ -69,6 +77,8 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
         _fps = fps;
         _bitrate = bitrate;
         _isRunning = NO;
+        _encoderQueue = dispatch_queue_create("com.local.iosrecorder.videoencoder", DISPATCH_QUEUE_SERIAL);
+        _encoderSemaphore = dispatch_semaphore_create(ENCODER_QUEUE_DEPTH);
     }
     return self;
 }
@@ -156,26 +166,33 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
         return;
     }
 
+    // Non-blocking queue depth check.  If fewer than ENCODER_QUEUE_DEPTH
+    // frames are pending, the semaphore returns immediately.  If the queue
+    // is full, we DROP this frame rather than blocking the render thread —
+    // this keeps the game running at full 120fps while ensuring IOSurface-
+    // backed pixel buffers are encoded before Metal recycles them.
+    if (dispatch_semaphore_wait(self.encoderSemaphore, DISPATCH_TIME_NOW) != 0) {
+        return;  // queue full — skip frame to keep render thread smooth
+    }
+
+    CVPixelBufferRetain(pixelBuffer);
     CMTime frameDuration = CMTimeMake(1, self.fps);
     int64_t frameNum = ++self.encodeCount;
 
-    // Encode directly on the calling thread (game render thread).
-    // The previous dispatch_async approach caused the serial queue to fall
-    // behind at 120fps, building a multi-second backlog.  By the time the
-    // encoder read the IOSurface-backed pixel buffer, Metal had already
-    // reused the surface for newer frames — the encoded video showed future
-    // content while PTS referenced the past, making audio appear to lag.
-    // Calling VTCompressionSessionEncodeFrame inline ensures the hardware
-    // encoder reads the IOSurface before Metal can overwrite it.
-    VTCompressionSessionEncodeFrame(self.session,
-                                     pixelBuffer,
-                                     timestamp,
-                                     frameDuration,
-                                     NULL, NULL, NULL);
-
-    if (frameNum % 100 == 1) {
-        vreclog("VT_IN  #%lld pts=%.3f", (long long)frameNum, CMTimeGetSeconds(timestamp));
-    }
+    dispatch_async(self.encoderQueue, ^{
+        if (self.session) {
+            VTCompressionSessionEncodeFrame(self.session,
+                                             pixelBuffer,
+                                             timestamp,
+                                             frameDuration,
+                                             NULL, NULL, NULL);
+            if (frameNum % 100 == 1) {
+                vreclog("VT_IN  #%lld pts=%.3f", (long long)frameNum, CMTimeGetSeconds(timestamp));
+            }
+        }
+        CVPixelBufferRelease(pixelBuffer);
+        dispatch_semaphore_signal(self.encoderSemaphore);
+    });
 }
 
 - (void)stopWithCompletion:(void (^)(void))completion {
@@ -184,25 +201,23 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
         return;
     }
 
-    // No encode queue backlog to drain — encodes happen inline on the render
-    // thread, so we can flush and tear down immediately.
-    self.isRunning = NO;
-
-    if (self.session) {
-        // Wait for any in-flight hardware encodes to finish
-        VTCompressionSessionCompleteFrames(self.session, kCMTimeInvalid);
-        VTCompressionSessionInvalidate(self.session);
-        CFRelease(self.session);
-        self.session = NULL;
-    }
-
-    vreclog("STOP submitted=%lld encoded=%lld", (long long)self.encodeCount, (long long)self.outputCount);
-    NSLog(@"[Recorder] VideoEncoder stopped (submitted=%lld encoded=%lld)",
-          (long long)self.encodeCount, (long long)self.outputCount);
-
-    if (completion) {
-        dispatch_async(dispatch_get_main_queue(), completion);
-    }
+    // Dispatch stop to the encoder queue so the (at most ENCODER_QUEUE_DEPTH)
+    // pending encode blocks finish first, then flush and tear down.
+    dispatch_async(self.encoderQueue, ^{
+        self.isRunning = NO;
+        if (self.session) {
+            VTCompressionSessionCompleteFrames(self.session, kCMTimeInvalid);
+            VTCompressionSessionInvalidate(self.session);
+            CFRelease(self.session);
+            self.session = NULL;
+        }
+        vreclog("STOP submitted=%lld encoded=%lld", (long long)self.encodeCount, (long long)self.outputCount);
+        NSLog(@"[Recorder] VideoEncoder stopped (submitted=%lld encoded=%lld)",
+              (long long)self.encodeCount, (long long)self.outputCount);
+        if (completion) {
+            dispatch_async(dispatch_get_main_queue(), completion);
+        }
+    });
 }
 
 - (void)dealloc {
