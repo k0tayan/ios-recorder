@@ -17,18 +17,13 @@ include $(THEOS_MAKE_PATH)/tweak.mk
 SSH_HOST ?= ipad
 DEB = $(lastword $(sort $(wildcard packages/*.deb)))
 
-.PHONY: deploy deploy-respring remove
+.PHONY: deploy remove
 
 deploy:
 	@echo "[*] Copying .deb to $(SSH_HOST)..."
 	scp $(DEB) $(SSH_HOST):/tmp/iosrecorder.deb
 	@echo "[*] Installing on $(SSH_HOST)..."
 	ssh $(SSH_HOST) "dpkg -i /tmp/iosrecorder.deb && rm /tmp/iosrecorder.deb"
-	@echo "[*] Done. Respring the device to load the tweak."
-
-deploy-respring: deploy
-	@echo "[*] Respringing..."
-	ssh $(SSH_HOST) "killall -9 SpringBoard"
 
 remove:
 	ssh $(SSH_HOST) "dpkg -r com.local.iosrecorder"
