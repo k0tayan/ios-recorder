@@ -53,10 +53,10 @@
         return NO;
     }
 
-    // Video input — passthrough H.264 with format hint
+    // Video input — passthrough HEVC with format hint
     CMVideoFormatDescriptionRef videoFmt = NULL;
     CMVideoFormatDescriptionCreate(kCFAllocatorDefault,
-                                    kCMVideoCodecType_H264,
+                                    kCMVideoCodecType_HEVC,
                                     self.width, self.height,
                                     NULL, &videoFmt);
 

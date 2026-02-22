@@ -88,7 +88,7 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
         kCFAllocatorDefault,
         self.width,
         self.height,
-        kCMVideoCodecType_H264,
+        kCMVideoCodecType_HEVC,
         NULL,  // encoderSpecification
         NULL,  // sourceImageBufferAttributes
         kCFAllocatorDefault,
@@ -105,7 +105,7 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
     // Configure session properties
     VTSessionSetProperty(self.session, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
     VTSessionSetProperty(self.session, kVTCompressionPropertyKey_ProfileLevel,
-                         kVTProfileLevel_H264_Main_AutoLevel);
+                         kVTProfileLevel_HEVC_Main_AutoLevel);
 
     int avgBitrate = self.bitrate;
     CFNumberRef bitrateRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &avgBitrate);
