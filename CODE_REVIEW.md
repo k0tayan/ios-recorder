@@ -36,11 +36,11 @@
 - **問題:** `self.isRunning = NO` がメインスレッドで即座にセットされた後、まだ `encoderQueue` に `dispatch_sync` でエンキューされている `encodePCMBuffer:` が `isRunning` チェックで早期リターンし、最後のデータが失われる可能性がある。
 - **修正内容:** `isRunning = NO` を `dispatch_async(encoderQueue, ...)` ブロック内に移動し、保留中の `encodePCMBuffer:` が先にデータを書き込めるようにした。加えて `encodePCMBuffer:` の `dispatch_sync` ブロック内に `isRunning` の再チェックを追加し、stop 後にキューに到達したブロックが破棄済み converter にアクセスするのを防止。
 
-### 4. sHookedUnits のメモリオーダリング不足
+### 4. ~~sHookedUnits のメモリオーダリング不足~~ ✅ 修正済み
 
-- **ファイル:** `AudioCapture.m:37-48, 169-171`
+- **ファイル:** `AudioCapture.m`
 - **問題:** `hooked_AudioUnitSetProperty` はゲームスレッドから呼ばれ、`renderCallbackWrapper` は RT スレッドから `info` を参照する。`sCapturedUnit` への書き込みにメモリオーダリングの保証がない。
-- **対策:** `sCapturedUnit` への書き込みを `atomic_store_explicit(..., memory_order_release)` にし、RT スレッドでの読み取りを `atomic_load_explicit(..., memory_order_acquire)` にする。
+- **修正内容:** `sCapturedUnit` を `_Atomic(AudioUnit)` に変更。ゲームスレッドでの書き込みを `atomic_store_explicit(..., memory_order_release)` にし、RT スレッドでの読み取りを `atomic_load_explicit(..., memory_order_acquire)` にした。release/acquire ペアにより `origCallback`/`origRefCon` の書き込みが RT スレッドに可視になることを保証。ログ用途の読み取りは `memory_order_relaxed` を使用。
 
 ---
 

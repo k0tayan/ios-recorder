@@ -43,8 +43,8 @@ typedef struct {
 } HookedUnitInfo;
 
 static HookedUnitInfo sHookedUnits[MAX_HOOKED_UNITS];
-static int            sHookedUnitCount = 0;
-static AudioUnit      sCapturedUnit    = NULL;   // この unit からのみ音声をキャプチャ
+static int              sHookedUnitCount = 0;
+static _Atomic(AudioUnit) sCapturedUnit = NULL;   // この unit からのみ音声をキャプチャ
 static atomic_uint_fast64_t sCallbackCount;        // レンダーコールバック総呼び出し回数
 static atomic_uint_fast64_t sCapturedCount;        // フィルタを通過したコールバック数
 static atomic_uint_fast64_t sCapturedFrames;       // キャプチャした音声フレーム総数
@@ -86,7 +86,8 @@ static OSStatus renderCallbackWrapper(void *inRefCon,
     }
 
     // 2. 指定 unit からのみキャプチャ (他はスキップ)
-    if (!info || info->unit != sCapturedUnit) return status;
+    AudioUnit captureUnit = atomic_load_explicit(&sCapturedUnit, memory_order_acquire);
+    if (!info || info->unit != captureUnit) return status;
 
     // 3. キャプチャ中でない or エラーなら早期リターン
     if (!atomic_load_explicit(&sCapturing, memory_order_acquire)) return status;
@@ -168,7 +169,8 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
 
             info->origCallback = cs->inputProc;
             info->origRefCon   = cs->inputProcRefCon;
-            sCapturedUnit = inUnit;   // 常に最新の unit からキャプチャ
+            // release: origCallback/origRefCon の書き込みが RT スレッドの acquire 読み取りより前に可視になる
+            atomic_store_explicit(&sCapturedUnit, inUnit, memory_order_release);
 
             // フォーマットを読み取る (ゲームスレッドなので安全、RT ではない)
             AudioStreamBasicDescription asbd = {0};
@@ -186,7 +188,7 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
             bool capturing = atomic_load_explicit(&sCapturing, memory_order_relaxed);
             reclog("HOOK unit=%p elem=%u fmt=%.0fHz/%uch cb=%p hooked=%d captureUnit=%p%s",
                    inUnit, (unsigned)inElement, asbd.mSampleRate, (unsigned)asbd.mChannelsPerFrame,
-                   cs->inputProc, sHookedUnitCount, sCapturedUnit,
+                   cs->inputProc, sHookedUnitCount, (void *)atomic_load_explicit(&sCapturedUnit, memory_order_relaxed),
                    capturing ? " [DURING_CAPTURE]" : "");
 
             // フォーマット世代をインクリメント — レンダーコールバックが新スロットにタグ付けする
@@ -282,7 +284,8 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
         // 最初のスロットでフォーマット再検出を強制 (ありえない値にセット)
         self.currentFormatGen = UINT32_MAX;
         reclog("START capturing=YES captureUnit=%p hookedUnits=%d sampleRate=%.0f ch=%u",
-               sCapturedUnit, sHookedUnitCount, self.sampleRate, (unsigned)self.channels);
+               (void *)atomic_load_explicit(&sCapturedUnit, memory_order_relaxed),
+               sHookedUnitCount, self.sampleRate, (unsigned)self.channels);
         [self _startDrainTimer];
         atomic_store_explicit(&sCapturing, true, memory_order_release);
     } else {
@@ -310,16 +313,17 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
 }
 
 - (void)updateAudioFormat {
-    if (sCapturedUnit) {
+    AudioUnit unit = atomic_load_explicit(&sCapturedUnit, memory_order_relaxed);
+    if (unit) {
         AudioStreamBasicDescription asbd;
         UInt32 size = sizeof(asbd);
         // まず Input スコープ (レンダーコールバックのフォーマット) を読み、失敗なら Output にフォールバック
-        OSStatus st = AudioUnitGetProperty(sCapturedUnit,
+        OSStatus st = AudioUnitGetProperty(unit,
                                             kAudioUnitProperty_StreamFormat,
                                             kAudioUnitScope_Input,
                                             0, &asbd, &size);
         if (st != noErr) {
-            st = AudioUnitGetProperty(sCapturedUnit,
+            st = AudioUnitGetProperty(unit,
                                        kAudioUnitProperty_StreamFormat,
                                        kAudioUnitScope_Output,
                                        0, &asbd, &size);
