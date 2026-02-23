@@ -24,11 +24,11 @@
 
 ## High
 
-### 2. VideoEncoder: outputCount のスレッドセーフティ
+### 2. ~~VideoEncoder: outputCount のスレッドセーフティ~~ ✅ 修正済み
 
-- **ファイル:** `VideoEncoder.m:34-47`
+- **ファイル:** `VideoEncoder.m`
 - **問題:** `videoEncoderOutputCallback` は VideoToolbox の内部スレッドから呼ばれるが、`outputCount` はアトミックではなく、`encoderQueue` 上でもない。
-- **対策:** `outputCount` を `atomic` にするか、コールバック内のカウントアップを `encoderQueue` にディスパッチする。
+- **修正内容:** `nonatomic` プロパティを `static _Atomic int64_t sOutputCount` に変更し、インクリメント・リセット・読み取りすべてを `stdatomic.h` の `atomic_fetch_add_explicit` / `atomic_store_explicit` / `atomic_load_explicit` で行うようにした。カウンタはログ用途のみなので `memory_order_relaxed` を使用。`encoderQueue` へのディスパッチは出力コールバックの遅延を増やすため不採用。
 
 ### 3. AudioEncoder: stopWithCompletion のレース
 

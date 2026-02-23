@@ -1,5 +1,6 @@
 #import "VideoEncoder.h"
 #import "RecorderLog.h"
+#import <stdatomic.h>
 
 DEFINE_RECLOG(vreclog, "iosrecorder_video.log")
 
@@ -18,8 +19,10 @@ DEFINE_RECLOG(vreclog, "iosrecorder_video.log")
 @property (nonatomic) dispatch_queue_t encoderQueue;
 @property (nonatomic) dispatch_semaphore_t encoderSemaphore;
 @property (nonatomic) int64_t encodeCount;
-@property (nonatomic) int64_t outputCount;
 @end
+
+// VT の内部スレッドからインクリメントされるためアトミックが必要
+static _Atomic int64_t sOutputCount;
 
 static void videoEncoderOutputCallback(void *outputCallbackRefCon,
                                         void *sourceFrameRefCon,
@@ -36,14 +39,15 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
         return;
     }
 
-    VideoEncoder *encoder = (__bridge VideoEncoder *)outputCallbackRefCon;
-    encoder.outputCount++;
+    int64_t count = atomic_fetch_add_explicit(&sOutputCount, 1, memory_order_relaxed) + 1;
 
     // 100 フレームごとに PTS 追跡用ログ
-    if (encoder.outputCount % 100 == 1) {
+    if (count % 100 == 1) {
         CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
-        vreclog("VT_OUT #%lld pts=%.3f", (long long)encoder.outputCount, CMTimeGetSeconds(pts));
+        vreclog("VT_OUT #%lld pts=%.3f", (long long)count, CMTimeGetSeconds(pts));
     }
+
+    VideoEncoder *encoder = (__bridge VideoEncoder *)outputCallbackRefCon;
 
     if (encoder.onEncodedSample) {
         CFRetain(sampleBuffer);
@@ -141,7 +145,7 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
 
     self.isRunning = YES;
     self.encodeCount = 0;
-    self.outputCount = 0;
+    atomic_store_explicit(&sOutputCount, 0, memory_order_relaxed);
     vreclog("START %dx%d @%dfps %dbps", self.width, self.height, self.fps, self.bitrate);
     NSLog(@"[Recorder] VideoEncoder started: %dx%d @ %dfps, %dbps",
           self.width, self.height, self.fps, self.bitrate);
@@ -207,9 +211,10 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
             CFRelease(self.session);
             self.session = NULL;
         }
-        vreclog("STOP submitted=%lld encoded=%lld", (long long)self.encodeCount, (long long)self.outputCount);
+        int64_t outCount = atomic_load_explicit(&sOutputCount, memory_order_relaxed);
+        vreclog("STOP submitted=%lld encoded=%lld", (long long)self.encodeCount, (long long)outCount);
         NSLog(@"[Recorder] VideoEncoder stopped (submitted=%lld encoded=%lld)",
-              (long long)self.encodeCount, (long long)self.outputCount);
+              (long long)self.encodeCount, (long long)outCount);
         if (completion) {
             dispatch_async(dispatch_get_main_queue(), completion);
         }
