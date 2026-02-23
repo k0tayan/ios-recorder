@@ -5,7 +5,7 @@
 #import <UIKit/UIKit.h>
 
 @interface RecorderCore ()
-@property (nonatomic, readwrite) BOOL isRecording;
+@property (atomic, readwrite) BOOL isRecording;
 @property (nonatomic) VideoEncoder *videoEncoder;
 @property (nonatomic) AudioEncoder *audioEncoder;
 @property (nonatomic) MP4Muxer *muxer;

@@ -14,6 +14,8 @@
 @property (nonatomic) BOOL sessionStarted;
 @property (nonatomic) BOOL videoInputReady;
 @property (nonatomic) BOOL audioInputReady;
+@property (nonatomic) int64_t videoDropCount;
+@property (nonatomic) int64_t audioDropCount;
 @end
 
 @implementation MP4Muxer
@@ -140,6 +142,8 @@
             if (![self.videoInput appendSampleBuffer:sampleBuffer]) {
                 NSLog(@"[Recorder] Failed to append video sample: %@", self.writer.error);
             }
+        } else {
+            self.videoDropCount++;
         }
 
         CFRelease(sampleBuffer);
@@ -167,6 +171,8 @@
             if (![self.audioInput appendSampleBuffer:sampleBuffer]) {
                 NSLog(@"[Recorder] Failed to append audio sample: %@", self.writer.error);
             }
+        } else {
+            self.audioDropCount++;
         }
 
         CFRelease(sampleBuffer);
@@ -177,12 +183,13 @@
     dispatch_async(self.muxerQueue, ^{
         if (self.writer.status != AVAssetWriterStatusWriting) {
             NSLog(@"[Recorder] Writer not in writing state: %ld", (long)self.writer.status);
-            if (completion) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    completion(nil);
-                });
-            }
+            if (completion) completion(nil);
             return;
+        }
+
+        if (self.videoDropCount > 0 || self.audioDropCount > 0) {
+            NSLog(@"[Recorder] Muxer drops: video=%lld audio=%lld (isReadyForMoreMediaData was NO)",
+                  (long long)self.videoDropCount, (long long)self.audioDropCount);
         }
 
         if (self.videoInputReady) [self.videoInput markAsFinished];
@@ -192,18 +199,14 @@
         [self.writer finishWritingWithCompletionHandler:^{
             if (self.writer.status == AVAssetWriterStatusCompleted) {
                 NSLog(@"[Recorder] MP4 written successfully: %@", path);
-                if (completion) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        completion(path);
-                    });
-                }
             } else {
                 NSLog(@"[Recorder] MP4 write failed: %@", self.writer.error);
-                if (completion) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        completion(nil);
-                    });
-                }
+            }
+            // stop チェーンはメインキューを経由しない。
+            // 最終的な呼び出し元 (ControlServer) がセマフォで待つため、
+            // メインキュー dispatch だとデッドロックの可能性がある。
+            if (completion) {
+                completion(self.writer.status == AVAssetWriterStatusCompleted ? path : nil);
             }
         }];
     });

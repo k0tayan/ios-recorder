@@ -2,16 +2,20 @@
 #import <IOSurface/IOSurfaceRef.h>
 #import <mach/mach_time.h>
 #import <objc/message.h>
+#include <stdatomic.h>
 
 // IOSurfaceRef を返す objc_msgSend の型定義
 typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
+
+// ObjC メッセージなしで Metal レンダリングスレッドから読めるフラグ
+static atomic_bool  sFrameCapturing;
+static CMTime       sFrameRecStartTime;
+static atomic_bool  sFrameRecStartTimeSet;
 
 @interface FrameCapture ()
 @property (atomic) CGSize captureSize;
 @property (nonatomic) uint64_t lastCaptureTime;
 @property (nonatomic) double ticksPerSecond;
-@property (nonatomic) CMTime recordingStartTime;
-@property (nonatomic) BOOL startTimeSet;
 @end
 
 @implementation FrameCapture
@@ -31,7 +35,8 @@ typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
         _targetFPS = 120;
         _capturing = NO;
         _lastCaptureTime = 0;
-        _startTimeSet = NO;
+        atomic_store_explicit(&sFrameCapturing, false, memory_order_relaxed);
+        atomic_store_explicit(&sFrameRecStartTimeSet, false, memory_order_relaxed);
 
         mach_timebase_info_data_t timebase;
         mach_timebase_info(&timebase);
@@ -41,8 +46,19 @@ typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
 }
 
 - (void)setRecordingStartTime:(CMTime)startTime {
-    _recordingStartTime = startTime;
-    _startTimeSet = YES;
+    sFrameRecStartTime = startTime;
+    // release: startTime の書き込みが Metal スレッドの acquire 読み取りより前に可視になる
+    atomic_store_explicit(&sFrameRecStartTimeSet, true, memory_order_release);
+}
+
+- (void)setCapturing:(BOOL)capturing {
+    _capturing = capturing;
+    if (capturing) {
+        atomic_store_explicit(&sFrameCapturing, true, memory_order_release);
+    } else {
+        atomic_store_explicit(&sFrameCapturing, false, memory_order_release);
+        atomic_store_explicit(&sFrameRecStartTimeSet, false, memory_order_relaxed);
+    }
 }
 
 - (void)captureDrawable:(id<CAMetalDrawable>)drawable {
@@ -53,12 +69,12 @@ typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
     id<MTLTexture> texture = drawable.texture;
     if (texture) {
         CGSize newSize = CGSizeMake(texture.width, texture.height);
-        if (!CGSizeEqualToSize(newSize, _captureSize)) {
+        if (!CGSizeEqualToSize(newSize, self.captureSize)) {
             self.captureSize = newSize;
         }
     }
 
-    if (!self.capturing || !self.delegate) {
+    if (!atomic_load_explicit(&sFrameCapturing, memory_order_acquire) || !self.delegate) {
         return;
     }
 
@@ -106,9 +122,15 @@ typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
             return;
         }
 
-        // モノトニックホストクロックから PTS を算出 (音声と同じタイムベース)
+        // モノトニックホストクロックから PTS を算出 (音声と同じタイムベース)。
+        // 注意: PTS は nextDrawable フック時点 (GPU レンダリング前) の時刻。
+        // IOSurface 暗黙的同期により VT は GPU 完了後の画素を読むが、PTS は
+        // レンダリング前の時刻のため 1-2 フレーム分 (8-16ms @120fps) の
+        // 系統的オフセットがある。A/V 同期に影響が出る場合は
+        // drawable.addPresentedHandler: で presentation 時刻を使うことを検討。
         CMTime currentTime = CMClockMakeHostTimeFromSystemUnits(now);
-        CMTime pts = self.startTimeSet ? CMTimeSubtract(currentTime, self.recordingStartTime) : kCMTimeZero;
+        CMTime pts = atomic_load_explicit(&sFrameRecStartTimeSet, memory_order_acquire)
+                   ? CMTimeSubtract(currentTime, sFrameRecStartTime) : kCMTimeZero;
 
         // drawable を surfaceOwner として渡し、エンコード完了まで IOSurface の再利用を防ぐ
         [self.delegate frameCapture:self

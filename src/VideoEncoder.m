@@ -9,7 +9,13 @@ DEFINE_RECLOG(vreclog, "iosrecorder_video.log")
 // エンコードされる (~25ms @120Hz)。レンダースレッドをほぼブロックしない。
 #define ENCODER_QUEUE_DEPTH 2
 
-@interface VideoEncoder ()
+@interface VideoEncoder () {
+    @public
+    // レンダースレッドからインクリメント、encoderQueue から読み取りのためアトミック
+    _Atomic int64_t _encodeCount;
+    // VT の内部スレッドからインクリメントされるためアトミック (C 関数からアクセス)
+    _Atomic int64_t _outputCount;
+}
 @property (nonatomic) VTCompressionSessionRef session;
 @property (nonatomic) int width;
 @property (nonatomic) int height;
@@ -19,12 +25,6 @@ DEFINE_RECLOG(vreclog, "iosrecorder_video.log")
 @property (nonatomic) dispatch_queue_t encoderQueue;
 @property (nonatomic) dispatch_semaphore_t encoderSemaphore;
 @end
-
-// レンダースレッドからインクリメント、encoderQueue から読み取りのためアトミック
-static _Atomic int64_t sEncodeCount;
-
-// VT の内部スレッドからインクリメントされるためアトミックが必要
-static _Atomic int64_t sOutputCount;
 
 static void videoEncoderOutputCallback(void *outputCallbackRefCon,
                                         void *sourceFrameRefCon,
@@ -41,15 +41,14 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
         return;
     }
 
-    int64_t count = atomic_fetch_add_explicit(&sOutputCount, 1, memory_order_relaxed) + 1;
+    VideoEncoder *encoder = (__bridge VideoEncoder *)outputCallbackRefCon;
+    int64_t count = atomic_fetch_add_explicit(&encoder->_outputCount, 1, memory_order_relaxed) + 1;
 
     // 100 フレームごとに PTS 追跡用ログ
     if (count % 100 == 1) {
         CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
         vreclog("VT_OUT #%lld pts=%.3f", (long long)count, CMTimeGetSeconds(pts));
     }
-
-    VideoEncoder *encoder = (__bridge VideoEncoder *)outputCallbackRefCon;
 
     if (encoder.onEncodedSample) {
         // sampleBuffer はコールバック中有効。MP4Muxer 側が自身で CFRetain するため、ここでの retain/release は不要。
@@ -113,7 +112,9 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
     CFRelease(bitrateRef);
 
     // データレート制限: [バイト/秒, 期間(秒)]
-    int bytesPerSecond = self.bitrate / 8;
+    // I フレームは P フレームの数倍のサイズになるため、ハードキャップに
+    // 平均の 1.5 倍のヘッドルームを持たせてキーフレーム品質を確保する。
+    int bytesPerSecond = (int)(self.bitrate * 1.5) / 8;
     double limitDuration = 1.0;
     CFNumberRef bytesRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &bytesPerSecond);
     CFNumberRef durationRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &limitDuration);
@@ -152,8 +153,8 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
     }
 
     self.isRunning = YES;
-    atomic_store_explicit(&sEncodeCount, 0, memory_order_relaxed);
-    atomic_store_explicit(&sOutputCount, 0, memory_order_relaxed);
+    atomic_store_explicit(&_encodeCount, 0, memory_order_relaxed);
+    atomic_store_explicit(&_outputCount, 0, memory_order_relaxed);
     vreclog("START %dx%d @%dfps %dbps", self.width, self.height, self.fps, self.bitrate);
     NSLog(@"[Recorder] VideoEncoder started: %dx%d @ %dfps, %dbps",
           self.width, self.height, self.fps, self.bitrate);
@@ -179,7 +180,7 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
     // VT の出力コールバックで CFRelease され、drawable が Metal に返却される。
     void *frameRefCon = surfaceOwner ? (__bridge_retained void *)surfaceOwner : NULL;
     CMTime frameDuration = CMTimeMake(1, self.fps);
-    int64_t frameNum = atomic_fetch_add_explicit(&sEncodeCount, 1, memory_order_relaxed) + 1;
+    int64_t frameNum = atomic_fetch_add_explicit(&_encodeCount, 1, memory_order_relaxed) + 1;
 
     dispatch_async(self.encoderQueue, ^{
         if (self.session) {
@@ -219,14 +220,12 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
             CFRelease(self.session);
             self.session = NULL;
         }
-        int64_t submitCount = atomic_load_explicit(&sEncodeCount, memory_order_relaxed);
-        int64_t outCount = atomic_load_explicit(&sOutputCount, memory_order_relaxed);
+        int64_t submitCount = atomic_load_explicit(&self->_encodeCount, memory_order_relaxed);
+        int64_t outCount = atomic_load_explicit(&self->_outputCount, memory_order_relaxed);
         vreclog("STOP submitted=%lld encoded=%lld", (long long)submitCount, (long long)outCount);
         NSLog(@"[Recorder] VideoEncoder stopped (submitted=%lld encoded=%lld)",
               (long long)submitCount, (long long)outCount);
-        if (completion) {
-            dispatch_async(dispatch_get_main_queue(), completion);
-        }
+        if (completion) completion();
     });
 }
 

@@ -10,6 +10,7 @@
 @property (nonatomic) int serverFd;
 @property (nonatomic) BOOL running;
 @property (nonatomic) dispatch_queue_t serverQueue;
+@property (nonatomic) dispatch_semaphore_t connectionSemaphore;
 @end
 
 @implementation ControlServer
@@ -21,6 +22,7 @@
         _serverFd = -1;
         _running = NO;
         _serverQueue = dispatch_queue_create("com.local.iosrecorder.controlserver", DISPATCH_QUEUE_SERIAL);
+        _connectionSemaphore = dispatch_semaphore_create(4);  // 同時接続数上限
     }
     return self;
 }
@@ -86,9 +88,11 @@
             continue;
         }
 
-        // 新しい dispatch でクライアントを処理
+        // 同時接続数を制限してスレッド枯渇を防止
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            dispatch_semaphore_wait(self.connectionSemaphore, DISPATCH_TIME_FOREVER);
             [self _handleClient:clientFd];
+            dispatch_semaphore_signal(self.connectionSemaphore);
         });
     }
 }
@@ -252,9 +256,26 @@
 - (void)_handlePull:(NSString *)path clientFd:(int)clientFd {
     NSFileManager *fm = [NSFileManager defaultManager];
 
-    // パストラバーサル対策: NSTemporaryDirectory 配下のファイルのみ許可
-    NSString *resolvedPath = path.stringByStandardizingPath;
-    NSString *tmpDir = NSTemporaryDirectory().stringByStandardizingPath;
+    // パストラバーサル対策: realpath(3) でシンボリックリンクと .. を完全解決し、
+    // NSTemporaryDirectory 配下のファイルのみ許可。以降すべて resolvedPath を使う。
+    const char *cPath = path.UTF8String;
+    char resolved[PATH_MAX];
+    if (!cPath || !realpath(cPath, resolved)) {
+        NSString *err = @"ERR File not found\n";
+        write(clientFd, err.UTF8String, strlen(err.UTF8String));
+        close(clientFd);
+        return;
+    }
+    NSString *resolvedPath = [NSString stringWithUTF8String:resolved];
+    // NSTemporaryDirectory() も realpath で正規化する (/var → /private/var 統一)
+    char resolvedTmp[PATH_MAX];
+    const char *cTmpDir = NSTemporaryDirectory().UTF8String;
+    NSString *tmpDir;
+    if (cTmpDir && realpath(cTmpDir, resolvedTmp)) {
+        tmpDir = [NSString stringWithUTF8String:resolvedTmp];
+    } else {
+        tmpDir = NSTemporaryDirectory().stringByStandardizingPath;
+    }
     if (![resolvedPath hasPrefix:tmpDir]) {
         NSString *err = @"ERR Access denied\n";
         write(clientFd, err.UTF8String, strlen(err.UTF8String));
@@ -262,23 +283,27 @@
         return;
     }
 
-    if (![fm fileExistsAtPath:path]) {
+    if (![fm fileExistsAtPath:resolvedPath]) {
         NSString *err = @"ERR File not found\n";
         write(clientFd, err.UTF8String, strlen(err.UTF8String));
         close(clientFd);
         return;
     }
 
-    NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+    NSDictionary *attrs = [fm attributesOfItemAtPath:resolvedPath error:nil];
     unsigned long long fileSize = [attrs fileSize];
 
-    NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:path];
+    NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:resolvedPath];
     if (!fh) {
         NSString *err = @"ERR Cannot open file\n";
         write(clientFd, err.UTF8String, strlen(err.UTF8String));
         close(clientFd);
         return;
     }
+
+    // クライアントが読み取りを停止した場合に write() が無期限ブロックするのを防止
+    struct timeval sndTimeout = { .tv_sec = 60, .tv_usec = 0 };
+    setsockopt(clientFd, SOL_SOCKET, SO_SNDTIMEO, &sndTimeout, sizeof(sndTimeout));
 
     // ヘッダー送信: OK <サイズ>\n
     NSString *header = [NSString stringWithFormat:@"OK %llu\n", fileSize];
@@ -316,13 +341,13 @@
         }
     }
 
-    NSLog(@"[Recorder] PULL: sent %llu bytes for %@", sent, path);
+    NSLog(@"[Recorder] PULL: sent %llu bytes for %@", sent, resolvedPath);
     [fh closeFile];
     close(clientFd);
 
     // 転送成功後にファイルを削除
-    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
-    NSLog(@"[Recorder] PULL: deleted %@", path);
+    [[NSFileManager defaultManager] removeItemAtPath:resolvedPath error:nil];
+    NSLog(@"[Recorder] PULL: deleted %@", resolvedPath);
 }
 
 #pragma mark - LIST コマンド

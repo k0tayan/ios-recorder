@@ -5,7 +5,7 @@
 
 @interface RecorderCore : NSObject <FrameCaptureDelegate, AudioCaptureDelegate>
 
-@property (nonatomic, readonly) BOOL isRecording;
+@property (atomic, readonly) BOOL isRecording;
 @property (nonatomic) int targetFPS;
 @property (nonatomic) int videoBitrate;
 @property (nonatomic) int audioBitrate;

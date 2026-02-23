@@ -109,8 +109,8 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
         _encoderInputBufferSize = 1024 * bytesPerFrame;
         _encoderInputBuffer = (uint8_t *)malloc(_encoderInputBufferSize);
 
-        // AAC 出力バッファ
-        _aacOutputBufferSize = 1024 * channels * 2;  // 余裕を持った出力バッファ
+        // AAC 出力バッファ (高ビットレート・多チャンネルでも十分な余裕を確保)
+        _aacOutputBufferSize = 8192;
         _aacOutputBuffer = (uint8_t *)malloc(_aacOutputBufferSize);
     }
     return self;
@@ -204,7 +204,7 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
     free(self.encoderInputBuffer);
     self.encoderInputBuffer = (uint8_t *)malloc(self.encoderInputBufferSize);
 
-    self.aacOutputBufferSize = 1024 * self.channels * 2;
+    self.aacOutputBufferSize = 8192;
     free(self.aacOutputBuffer);
     self.aacOutputBuffer = (uint8_t *)malloc(self.aacOutputBufferSize);
 
@@ -472,9 +472,7 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
         [self _disposeConverter];
 
         NSLog(@"[Recorder] AudioEncoder stopped");
-        if (completion) {
-            dispatch_async(dispatch_get_main_queue(), completion);
-        }
+        if (completion) completion();
     });
 }
 
