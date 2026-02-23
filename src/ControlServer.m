@@ -240,6 +240,16 @@
 - (void)_handlePull:(NSString *)path clientFd:(int)clientFd {
     NSFileManager *fm = [NSFileManager defaultManager];
 
+    // パストラバーサル対策: NSTemporaryDirectory 配下のファイルのみ許可
+    NSString *resolvedPath = path.stringByStandardizingPath;
+    NSString *tmpDir = NSTemporaryDirectory().stringByStandardizingPath;
+    if (![resolvedPath hasPrefix:tmpDir]) {
+        NSString *err = @"ERR Access denied\n";
+        write(clientFd, err.UTF8String, strlen(err.UTF8String));
+        close(clientFd);
+        return;
+    }
+
     if (![fm fileExistsAtPath:path]) {
         NSString *err = @"ERR File not found\n";
         write(clientFd, err.UTF8String, strlen(err.UTF8String));

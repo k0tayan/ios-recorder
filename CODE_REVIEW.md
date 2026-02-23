@@ -92,11 +92,11 @@
 - **問題:** エンコーダの start が失敗した場合、前のインスタンスが中途半端な状態で残る。ARC で基本 OK だが明示的なクリーンアップが望ましい。
 - **修正内容:** VideoEncoder / AudioEncoder / MP4Muxer それぞれの `start` 失敗時に、既に開始済みのコンポーネントを stop し、全プロパティを nil に戻すようにした。
 
-### 12. ControlServer: PULL コマンドのパストラバーサル
+### 12. ~~ControlServer: PULL コマンドのパストラバーサル~~ ✅ 修正済み
 
-- **ファイル:** `ControlServer.m:233`
+- **ファイル:** `ControlServer.m`
 - **問題:** クライアントが任意のパスを指定でき、ファイル読み取り+削除が可能。
-- **対策:** `NSTemporaryDirectory()` プレフィックスのバリデーションを入れる。
+- **修正内容:** `stringByStandardizingPath` でシンボリックリンクと `../` を解決した上で、`NSTemporaryDirectory()` プレフィックスのバリデーションを追加。一致しない場合は `ERR Access denied` を返す。
 
 ---
 
