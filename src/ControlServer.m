@@ -290,16 +290,18 @@
     NSLog(@"[Recorder] PULL: sent %llu bytes for %@", sent, path);
     [fh closeFile];
     close(clientFd);
+
+    // Delete file after successful transfer
+    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    NSLog(@"[Recorder] PULL: deleted %@", path);
 }
 
 #pragma mark - LIST command
 
 - (NSString *)_handleList {
-    NSArray *docPaths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *recordingsDir = [docPaths.firstObject stringByAppendingPathComponent:@"Recordings"];
-
+    NSString *tmpDir = NSTemporaryDirectory();
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray *files = [fm contentsOfDirectoryAtPath:recordingsDir error:nil];
+    NSArray *files = [fm contentsOfDirectoryAtPath:tmpDir error:nil];
 
     if (!files || files.count == 0) {
         return @"OK";
@@ -307,8 +309,8 @@
 
     NSMutableArray *entries = [NSMutableArray array];
     for (NSString *file in files) {
-        if (![file hasSuffix:@".mp4"]) continue;
-        NSString *fullPath = [recordingsDir stringByAppendingPathComponent:file];
+        if (![file hasPrefix:@"recording_"] || ![file hasSuffix:@".mp4"]) continue;
+        NSString *fullPath = [tmpDir stringByAppendingPathComponent:file];
         NSDictionary *attrs = [fm attributesOfItemAtPath:fullPath error:nil];
         unsigned long long size = [attrs fileSize];
         [entries addObject:[NSString stringWithFormat:@"%@:%llu", file, size]];

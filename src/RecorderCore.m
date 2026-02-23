@@ -181,38 +181,11 @@
             [weakSelf.muxer finishWithCompletion:^(NSString *outputPath) {
                 if (outputPath) {
                     NSLog(@"[Recorder] Recording saved: %@", outputPath);
-                    NSString *savedPath = [weakSelf _saveToCameraRoll:outputPath];
-                    if (completion) completion(savedPath ?: outputPath);
-                } else {
-                    if (completion) completion(nil);
                 }
+                if (completion) completion(outputPath);
             }];
         }];
     }];
-}
-
-- (NSString *)_saveToCameraRoll:(NSString *)path {
-    // Save to app's Documents directory
-    NSArray *docPaths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *docsDir = [docPaths.firstObject stringByAppendingPathComponent:@"Recordings"];
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:docsDir]) {
-        [fm createDirectoryAtPath:docsDir withIntermediateDirectories:YES attributes:nil error:nil];
-    }
-
-    NSString *filename = [path lastPathComponent];
-    NSString *destPath = [docsDir stringByAppendingPathComponent:filename];
-    NSError *error = nil;
-    [fm copyItemAtPath:path toPath:destPath error:&error];
-    if (error) {
-        NSLog(@"[Recorder] Failed to copy to Documents: %@", error);
-        return nil;
-    }
-    NSLog(@"[Recorder] Copied to: %@", destPath);
-    // Remove tmp copy since it's safely in Documents
-    [fm removeItemAtPath:path error:nil];
-    NSLog(@"[Recorder] Removed tmp: %@", path);
-    return destPath;
 }
 
 - (NSDictionary *)cleanupTempFiles {
@@ -255,16 +228,11 @@
                 deletedCount++;
                 continue;
             }
-            // Non-zero recordings that were already copied to Documents
+            // Non-zero recordings that are not currently being recorded
             if (![fullPath isEqualToString:self.currentOutputPath] || !self.isRecording) {
-                NSArray *docPaths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-                NSString *docsDir = [docPaths.firstObject stringByAppendingPathComponent:@"Recordings"];
-                NSString *docCopy = [docsDir stringByAppendingPathComponent:name];
-                if ([fm fileExistsAtPath:docCopy]) {
-                    freedBytes += size;
-                    [fm removeItemAtPath:fullPath error:nil];
-                    deletedCount++;
-                }
+                freedBytes += size;
+                [fm removeItemAtPath:fullPath error:nil];
+                deletedCount++;
             }
         }
     }
