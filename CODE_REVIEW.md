@@ -58,11 +58,11 @@
 - **問題:** プライミング補償で最初の 2〜3 フレームの `sampleOffset` が負値になり、`AVAssetWriter` が負の PTS を拒否する可能性がある。
 - **修正内容:** PTS 算出後に `CMTimeCompare(pts, kCMTimeZero) < 0` で負値を検出し、0 にクランプするようにした。
 
-### 7. VideoEncoder: 出力コールバック内の冗長な CFRetain/CFRelease
+### 7. ~~VideoEncoder: 出力コールバック内の冗長な CFRetain/CFRelease~~ ✅ 修正済み
 
-- **ファイル:** `VideoEncoder.m:44-46`
+- **ファイル:** `VideoEncoder.m`
 - **問題:** `sampleBuffer` を retain→callback→release しているが、callback 側（`MP4Muxer.appendVideoSample:`）でも `CFRetain` しているので冗長。
-- **対策:** callback 側が retain 責任を持つ設計なので、ここの retain/release を削除可能。
+- **修正内容:** VT 出力コールバック内の `CFRetain`/`CFRelease` を削除。`sampleBuffer` はコールバック中有効であり、`MP4Muxer` 側が自身で `CFRetain` する設計のため不要。
 
 ### 8. ControlServer: TCP read が部分的に返る可能性
 

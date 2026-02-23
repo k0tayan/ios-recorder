@@ -50,9 +50,8 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
     VideoEncoder *encoder = (__bridge VideoEncoder *)outputCallbackRefCon;
 
     if (encoder.onEncodedSample) {
-        CFRetain(sampleBuffer);
+        // sampleBuffer はコールバック中有効。MP4Muxer 側が自身で CFRetain するため、ここでの retain/release は不要。
         encoder.onEncodedSample(sampleBuffer);
-        CFRelease(sampleBuffer);
     }
 }
 
