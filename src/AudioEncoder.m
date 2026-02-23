@@ -271,6 +271,7 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
     // コピーされるまで有効でなければならない。drain スレッドはエンコーダー
     // キューがコピー + エンコードする間一時的にブロックされる — これは意図的。
     dispatch_sync(self.encoderQueue, ^{
+        if (!self.isRunning) return;  // stop 後にキューに到達したブロックを弾く
         if (!self.ptsInitialized) {
             self.firstTimestamp = timestamp;
             self.firstWallTime = CMClockGetTime(CMClockGetHostTimeClock());
@@ -442,9 +443,10 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
         return;
     }
 
-    self.isRunning = NO;
-
+    // isRunning = NO を encoderQueue 内で行い、保留中の encodePCMBuffer の
+    // dispatch_sync ブロックがデータを書き込み終えてから停止する。
     dispatch_async(self.encoderQueue, ^{
+        self.isRunning = NO;
         // 残りのサンプルをエンコード
         [self _encodeAvailableFrames];
         [self _disposeConverter];

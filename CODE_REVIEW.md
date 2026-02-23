@@ -30,11 +30,11 @@
 - **問題:** `videoEncoderOutputCallback` は VideoToolbox の内部スレッドから呼ばれるが、`outputCount` はアトミックではなく、`encoderQueue` 上でもない。
 - **修正内容:** `nonatomic` プロパティを `static _Atomic int64_t sOutputCount` に変更し、インクリメント・リセット・読み取りすべてを `stdatomic.h` の `atomic_fetch_add_explicit` / `atomic_store_explicit` / `atomic_load_explicit` で行うようにした。カウンタはログ用途のみなので `memory_order_relaxed` を使用。`encoderQueue` へのディスパッチは出力コールバックの遅延を増やすため不採用。
 
-### 3. AudioEncoder: stopWithCompletion のレース
+### 3. ~~AudioEncoder: stopWithCompletion のレース~~ ✅ 修正済み
 
-- **ファイル:** `AudioEncoder.m:439-457`
+- **ファイル:** `AudioEncoder.m`
 - **問題:** `self.isRunning = NO` がメインスレッドで即座にセットされた後、まだ `encoderQueue` に `dispatch_sync` でエンキューされている `encodePCMBuffer:` が `isRunning` チェックで早期リターンし、最後のデータが失われる可能性がある。
-- **対策:** `isRunning = NO` の設定を `encoderQueue` のブロック内に移す。
+- **修正内容:** `isRunning = NO` を `dispatch_async(encoderQueue, ...)` ブロック内に移動し、保留中の `encodePCMBuffer:` が先にデータを書き込めるようにした。加えて `encodePCMBuffer:` の `dispatch_sync` ブロック内に `isRunning` の再チェックを追加し、stop 後にキューに到達したブロックが破棄済み converter にアクセスするのを防止。
 
 ### 4. sHookedUnits のメモリオーダリング不足
 
