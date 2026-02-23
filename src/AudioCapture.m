@@ -37,9 +37,9 @@ static atomic_uint  sFormatGeneration;   // AudioUnit 再構成ごとにイン�
 #define MAX_HOOKED_UNITS 8
 
 typedef struct {
-    AURenderCallback origCallback;
-    void            *origRefCon;
-    AudioUnit        unit;
+    _Atomic(AURenderCallback) origCallback;
+    _Atomic(void *)           origRefCon;
+    AudioUnit                 unit;
 } HookedUnitInfo;
 
 static HookedUnitInfo sHookedUnits[MAX_HOOKED_UNITS];
@@ -66,10 +66,14 @@ static OSStatus renderCallbackWrapper(void *inRefCon,
     HookedUnitInfo *info = (HookedUnitInfo *)inRefCon;
 
     // 1. この AudioUnit の元のレンダーコールバックを呼ぶ
+    // acquire load: hooked_AudioUnitSetProperty の release store と対にし、
+    // origCallback/origRefCon の書き込みが RT スレッドに可視であることを保証する。
     OSStatus status = noErr;
-    if (info && info->origCallback) {
-        status = info->origCallback(info->origRefCon, ioActionFlags, inTimeStamp,
-                                     inBusNumber, inNumberFrames, ioData);
+    AURenderCallback cb = atomic_load_explicit(&info->origCallback, memory_order_acquire);
+    void *refCon = atomic_load_explicit(&info->origRefCon, memory_order_relaxed);
+    if (info && cb) {
+        status = cb(refCon, ioActionFlags, inTimeStamp,
+                    inBusNumber, inNumberFrames, ioData);
     } else {
         // 元コールバックが NULL (FMOD 再構成中)。
         // スピーカー出力用に無音で埋めるが、キャプチャはしない —
@@ -167,9 +171,11 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
                                                   inData, inDataSize);
             }
 
-            info->origCallback = cs->inputProc;
-            info->origRefCon   = cs->inputProcRefCon;
-            // release: origCallback/origRefCon の書き込みが RT スレッドの acquire 読み取りより前に可視になる
+            // release store: origCallback の書き込みが RT スレッドの acquire load より前に可視になる。
+            // origRefCon を先に (relaxed で十分)、origCallback を release store で書く。
+            // RT スレッドは origCallback の acquire load で origRefCon の可視性も保証される。
+            atomic_store_explicit(&info->origRefCon, cs->inputProcRefCon, memory_order_relaxed);
+            atomic_store_explicit(&info->origCallback, cs->inputProc, memory_order_release);
             atomic_store_explicit(&sCapturedUnit, inUnit, memory_order_release);
 
             // フォーマットを読み取る (ゲームスレッドなので安全、RT ではない)

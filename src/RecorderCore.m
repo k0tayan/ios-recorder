@@ -12,6 +12,7 @@
 @property (nonatomic) CMTime recordingStartTime;
 @property (nonatomic) NSString *currentOutputPath;
 @property (nonatomic) id backgroundObserver;
+@property (nonatomic) dispatch_queue_t recordingQueue;  // start/stop のシリアライズ用
 @end
 
 @implementation RecorderCore
@@ -33,6 +34,7 @@
         _videoBitrate = 16000000;
         _audioBitrate = 128000;
         _maxCaptureSize = CGSizeMake(2560, 1440);
+        _recordingQueue = dispatch_queue_create("com.local.iosrecorder.recording", DISPATCH_QUEUE_SERIAL);
         // バックグラウンド遷移を監視 (retain cycle 回避のため __weak を使用)
         __weak typeof(self) weakSelf = self;
         _backgroundObserver = [[NSNotificationCenter defaultCenter]
@@ -52,6 +54,13 @@
 }
 
 - (void)startRecording {
+    // recordingQueue でシリアライズし、stop 完了チェーンとの競合を防止
+    dispatch_sync(self.recordingQueue, ^{
+        [self _startRecordingInternal];
+    });
+}
+
+- (void)_startRecordingInternal {
     if (self.isRecording) {
         NSLog(@"[Recorder] Already recording");
         return;
@@ -82,10 +91,11 @@
         float scale = fminf(scaleW, scaleH);
         width = (int)(width * scale);
         height = (int)(height * scale);
-        // HEVC 用に偶数を保証
-        width = width & ~1;
-        height = height & ~1;
     }
+
+    // HEVC エンコーダは偶数ピクセルを要求 — スケーリングパスに関わらず常に保証
+    width = width & ~1;
+    height = height & ~1;
 
     // VideoEncoder 初期化
     self.videoEncoder = [[VideoEncoder alloc] initWithWidth:width
@@ -115,7 +125,8 @@
         [weakMuxer appendAudioSample:sampleBuffer];
     };
 
-    // 全コンポーネント開始 (部分失敗時は中途半端な状態を残さないよう nil クリーンアップ)
+    // 全コンポーネント開始。部分失敗時は開始済みコンポーネントを同期的に停止し、
+    // VTCompressionSession 等のリソースが確実に解放されてからリターンする。
     if (![self.videoEncoder start]) {
         NSLog(@"[Recorder] Failed to start VideoEncoder");
         self.videoEncoder = nil;
@@ -125,7 +136,9 @@
     }
     if (![self.audioEncoder start]) {
         NSLog(@"[Recorder] Failed to start AudioEncoder");
-        [self.videoEncoder stopWithCompletion:nil];
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        [self.videoEncoder stopWithCompletion:^{ dispatch_semaphore_signal(sem); }];
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
         self.videoEncoder = nil;
         self.audioEncoder = nil;
         self.muxer = nil;
@@ -138,8 +151,11 @@
 
     if (![self.muxer start]) {
         NSLog(@"[Recorder] Failed to start MP4Muxer");
-        [self.videoEncoder stopWithCompletion:nil];
-        [self.audioEncoder stopWithCompletion:nil];
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        [self.videoEncoder stopWithCompletion:^{
+            [self.audioEncoder stopWithCompletion:^{ dispatch_semaphore_signal(sem); }];
+        }];
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
         self.videoEncoder = nil;
         self.audioEncoder = nil;
         self.muxer = nil;
@@ -166,6 +182,15 @@
 }
 
 - (void)stopRecordingWithCompletion:(void (^)(NSString *outputPath))completion {
+    // recordingQueue でシリアライズし、start との競合を防止。
+    // dispatch_async を使い、ControlServer の STOP セマフォ待ちと
+    // recordingQueue のデッドロックを回避する。
+    dispatch_async(self.recordingQueue, ^{
+        [self _stopRecordingInternalWithCompletion:completion];
+    });
+}
+
+- (void)_stopRecordingInternalWithCompletion:(void (^)(NSString *outputPath))completion {
     if (!self.isRecording) {
         NSLog(@"[Recorder] Not recording");
         if (completion) completion(nil);
@@ -204,6 +229,9 @@
 }
 
 - (void)forceResetRecordingState {
+    // 緊急リセット: recordingQueue を経由しない。
+    // STOP タイムアウト時に recordingQueue の stop ブロックがまだ実行中の可能性があるため、
+    // dispatch_sync だとデッドロックする。排他より即座のリセットを優先。
     NSLog(@"[Recorder] Force resetting recording state");
     [FrameCapture shared].capturing = NO;
     [FrameCapture shared].delegate = nil;
@@ -239,8 +267,14 @@
 
         // NSIRD_ProductName_* ディレクトリ
         if (isDir && [name hasPrefix:@"NSIRD_"]) {
-            NSDictionary *attrs = [fm attributesOfItemAtPath:fullPath error:nil];
-            freedBytes += [attrs fileSize];
+            // ディレクトリ内のファイルサイズを再帰的に合算
+            NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:fullPath];
+            for (__unused NSString *subPath in enumerator) {
+                NSDictionary *subAttrs = [enumerator fileAttributes];
+                if (![subAttrs[NSFileType] isEqualToString:NSFileTypeDirectory]) {
+                    freedBytes += [subAttrs fileSize];
+                }
+            }
             [fm removeItemAtPath:fullPath error:nil];
             deletedCount++;
             continue;

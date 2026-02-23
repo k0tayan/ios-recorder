@@ -233,6 +233,10 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
 }
 
 - (void)reconfigureWithSampleRate:(Float64)sampleRate channels:(UInt32)channels {
+    // 注意: dispatch_sync なので呼び出し元 (AudioCapture の drainQueue) をブロックする。
+    // drainQueue → encoderQueue は一方向のため デッドロックしないが、reconfigure 中は
+    // リングバッファが溢れて RT スレッドの音声がドロップする可能性がある。
+    // フォーマット変更は稀 (FMOD エンジン再構成時のみ) なので許容する。
     dispatch_sync(self.encoderQueue, ^{
         if (sampleRate == self.sampleRate && channels == self.channels) return;
 
@@ -379,9 +383,11 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
         // PTS = firstTimestamp + (frameIndex × 1024 − primingSamples) / sampleRate
         // priming を引くことで AAC エンコーダのプライミング遅延を補償し、
         // デコーダの出力を元のキャプチャ時刻に合わせる。
+        // CMTimeMake で整数演算のみを使用し、CMTimeMakeWithSeconds の
+        // 浮動小数点丸めによる長時間録画での PTS 累積ドリフトを防止。
         int64_t sampleOffset = (int64_t)self.totalFramesEncoded * 1024 - (int64_t)self.primingSamples;
         CMTime pts = CMTimeAdd(self.firstTimestamp,
-            CMTimeMakeWithSeconds((double)sampleOffset / self.sampleRate, (int32_t)self.sampleRate));
+            CMTimeMake(sampleOffset, (int32_t)self.sampleRate));
         // プライミング補償で最初の数フレームの PTS が負になりうる — AVAssetWriter が拒否するため 0 にクランプ
         if (CMTimeCompare(pts, kCMTimeZero) < 0) {
             pts = kCMTimeZero;

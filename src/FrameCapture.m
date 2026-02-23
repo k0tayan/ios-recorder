@@ -78,71 +78,67 @@ static atomic_bool  sFrameRecStartTimeSet;
         return;
     }
 
-    @try {
-        // フレームレート制御 (120Hz ソースから 60fps 目標で確実に
-        // 1フレームおきにキャプチャするため 0.85x 閾値を使用)
-        uint64_t now = mach_absolute_time();
-        if (self.lastCaptureTime != 0) {
-            double elapsed = (double)(now - self.lastCaptureTime) / self.ticksPerSecond;
-            if (elapsed < (0.85 / self.targetFPS)) {
-                return;
-            }
-        }
-        self.lastCaptureTime = now;
-
-        if (!texture) {
+    // フレームレート制御 (120Hz ソースから 60fps 目標で確実に
+    // 1フレームおきにキャプチャするため 0.85x 閾値を使用)
+    uint64_t now = mach_absolute_time();
+    if (self.lastCaptureTime != 0) {
+        double elapsed = (double)(now - self.lastCaptureTime) / self.ticksPerSecond;
+        if (elapsed < (0.85 / self.targetFPS)) {
             return;
         }
-
-        // objc_msgSend 経由で IOSurface にアクセス (private API、ObjC オブジェクトではなく CFTypeRef を返す)
-        SEL iosurfaceSel = sel_registerName("iosurface");
-        if (![texture respondsToSelector:iosurfaceSel]) {
-            NSLog(@"[Recorder] Texture does not respond to iosurface");
-            return;
-        }
-        IOSurfaceGetter getter = (IOSurfaceGetter)objc_msgSend;
-        IOSurfaceRef surface = getter(texture, iosurfaceSel);
-        if (!surface) {
-            return;
-        }
-
-        // IOSurface から CVPixelBuffer を生成 (ロックなし・ゼロコピー)
-        CVPixelBufferRef pixelBuffer = NULL;
-        NSDictionary *attrs = @{
-            (__bridge NSString *)kCVPixelBufferIOSurfacePropertiesKey: @{}
-        };
-        CVReturn result = CVPixelBufferCreateWithIOSurface(
-            kCFAllocatorDefault,
-            surface,
-            (__bridge CFDictionaryRef)attrs,
-            &pixelBuffer
-        );
-
-        if (result != kCVReturnSuccess || !pixelBuffer) {
-            return;
-        }
-
-        // モノトニックホストクロックから PTS を算出 (音声と同じタイムベース)。
-        // 注意: PTS は nextDrawable フック時点 (GPU レンダリング前) の時刻。
-        // IOSurface 暗黙的同期により VT は GPU 完了後の画素を読むが、PTS は
-        // レンダリング前の時刻のため 1-2 フレーム分 (8-16ms @120fps) の
-        // 系統的オフセットがある。A/V 同期に影響が出る場合は
-        // drawable.addPresentedHandler: で presentation 時刻を使うことを検討。
-        CMTime currentTime = CMClockMakeHostTimeFromSystemUnits(now);
-        CMTime pts = atomic_load_explicit(&sFrameRecStartTimeSet, memory_order_acquire)
-                   ? CMTimeSubtract(currentTime, sFrameRecStartTime) : kCMTimeZero;
-
-        // drawable を surfaceOwner として渡し、エンコード完了まで IOSurface の再利用を防ぐ
-        [self.delegate frameCapture:self
-             didCapturePixelBuffer:pixelBuffer
-                        timestamp:pts
-                     surfaceOwner:drawable];
-
-        // 解放 (デリゲート側で必要なら retain 済み)
-        CVPixelBufferRelease(pixelBuffer);
-    } @catch (NSException *e) {
-        NSLog(@"[Recorder] captureDrawable exception: %@ %@", e.name, e.reason);
     }
+    self.lastCaptureTime = now;
+
+    if (!texture) {
+        return;
+    }
+
+    // objc_msgSend 経由で IOSurface にアクセス (private API、ObjC オブジェクトではなく CFTypeRef を返す)
+    SEL iosurfaceSel = sel_registerName("iosurface");
+    if (![texture respondsToSelector:iosurfaceSel]) {
+        NSLog(@"[Recorder] Texture does not respond to iosurface");
+        return;
+    }
+    IOSurfaceGetter getter = (IOSurfaceGetter)objc_msgSend;
+    IOSurfaceRef surface = getter(texture, iosurfaceSel);
+    if (!surface) {
+        return;
+    }
+
+    // IOSurface から CVPixelBuffer を生成 (ロックなし・ゼロコピー)
+    CVPixelBufferRef pixelBuffer = NULL;
+    NSDictionary *attrs = @{
+        (__bridge NSString *)kCVPixelBufferIOSurfacePropertiesKey: @{}
+    };
+    CVReturn result = CVPixelBufferCreateWithIOSurface(
+        kCFAllocatorDefault,
+        surface,
+        (__bridge CFDictionaryRef)attrs,
+        &pixelBuffer
+    );
+
+    if (result != kCVReturnSuccess || !pixelBuffer) {
+        return;
+    }
+
+    // モノトニックホストクロックから PTS を算出 (音声と同じタイムベース)。
+    // 注意: PTS は nextDrawable フック時点 (GPU レンダリング前) の時刻。
+    // IOSurface 暗黙的同期により VT は GPU 完了後の画素を読むが、PTS は
+    // レンダリング前の時刻のため 1-2 フレーム分 (8-16ms @120fps) の
+    // 系統的オフセットがある。A/V 同期に影響が出る場合は
+    // drawable.addPresentedHandler: で presentation 時刻を使うことを検討。
+    CMTime currentTime = CMClockMakeHostTimeFromSystemUnits(now);
+    CMTime pts = atomic_load_explicit(&sFrameRecStartTimeSet, memory_order_acquire)
+               ? CMTimeSubtract(currentTime, sFrameRecStartTime) : kCMTimeZero;
+
+    // drawable を surfaceOwner として渡し、エンコード完了まで IOSurface の再利用を防ぐ
+    [self.delegate frameCapture:self
+         didCapturePixelBuffer:pixelBuffer
+                    timestamp:pts
+                 surfaceOwner:drawable];
+
+    // 解放 (デリゲート側で必要なら retain 済み)
+    CVPixelBufferRelease(pixelBuffer);
 }
 
 @end

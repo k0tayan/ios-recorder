@@ -4,9 +4,10 @@
 
 DEFINE_RECLOG(vreclog, "iosrecorder_video.log")
 
-// 非同期エンコードのキュー深度上限。Metal の drawable プールは ~3 サーフェスなので、
-// キューを浅く保つことで IOSurface バックの pixel buffer が Metal に再利用される前に
-// エンコードされる (~25ms @120Hz)。レンダースレッドをほぼブロックしない。
+// 同時エンコードの上限。Metal の drawable プールは ~3 サーフェスなので、
+// VT 出力コールバック (drawable 解放時) でセマフォを signal することで、
+// 保持中の drawable 数を正確にこの値以下に制限する。
+// 値を 2 にすると VT 内部保持分を含め最大 2 drawable → プール枯渇しない。
 #define ENCODER_QUEUE_DEPTH 2
 
 @interface VideoEncoder () {
@@ -31,17 +32,22 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
                                         OSStatus status,
                                         VTEncodeInfoFlags infoFlags,
                                         CMSampleBufferRef sampleBuffer) {
-    // エンコード完了 — drawable (surfaceOwner) を解放して IOSurface を Metal に返す
+    VideoEncoder *encoder = (__bridge VideoEncoder *)outputCallbackRefCon;
+
+    // エンコード完了 — drawable (surfaceOwner) を解放して IOSurface を Metal に返し、
+    // セマフォを signal して次のフレーム受付を許可する。
+    // drawable 解放とセマフォ signal を同じタイミングで行うことで、
+    // 保持中の drawable 数が ENCODER_QUEUE_DEPTH を超えないことを保証する。
     if (sourceFrameRefCon) {
         CFRelease(sourceFrameRefCon);
     }
+    dispatch_semaphore_signal(encoder.encoderSemaphore);
 
     if (status != noErr || !sampleBuffer) {
         NSLog(@"[Recorder] Video encode error: %d", (int)status);
         return;
     }
 
-    VideoEncoder *encoder = (__bridge VideoEncoder *)outputCallbackRefCon;
     int64_t count = atomic_fetch_add_explicit(&encoder->_outputCount, 1, memory_order_relaxed) + 1;
 
     // 100 フレームごとに PTS 追跡用ログ
@@ -177,7 +183,7 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
 
     CVPixelBufferRetain(pixelBuffer);
     // surfaceOwner (drawable) を retain して sourceFrameRefCon に渡す。
-    // VT の出力コールバックで CFRelease され、drawable が Metal に返却される。
+    // VT の出力コールバックで CFRelease + semaphore signal され、drawable が Metal に返却される。
     void *frameRefCon = surfaceOwner ? (__bridge_retained void *)surfaceOwner : NULL;
     CMTime frameDuration = CMTimeMake(1, self.fps);
     int64_t frameNum = atomic_fetch_add_explicit(&_encodeCount, 1, memory_order_relaxed) + 1;
@@ -189,18 +195,22 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
                                              timestamp,
                                              frameDuration,
                                              NULL, frameRefCon, NULL);
-            if (st != noErr && frameRefCon) {
-                // エンコード失敗時はコールバックが呼ばれないので手動解放
-                CFRelease(frameRefCon);
+            if (st != noErr) {
+                // エンコード失敗時は出力コールバックが呼ばれないので手動解放 + signal
+                if (frameRefCon) CFRelease(frameRefCon);
+                dispatch_semaphore_signal(self.encoderSemaphore);
             }
             if (frameNum % 100 == 1) {
                 vreclog("VT_IN  #%lld pts=%.3f", (long long)frameNum, CMTimeGetSeconds(timestamp));
             }
-        } else if (frameRefCon) {
-            CFRelease(frameRefCon);
+        } else {
+            // セッション破棄済み — 手動解放 + signal
+            if (frameRefCon) CFRelease(frameRefCon);
+            dispatch_semaphore_signal(self.encoderSemaphore);
         }
         CVPixelBufferRelease(pixelBuffer);
-        dispatch_semaphore_signal(self.encoderSemaphore);
+        // 注: セマフォは VT 出力コールバック内で signal される (正常パス)。
+        // ここでは signal しない — drawable 解放と同時に signal することで保持数を正確に制限。
     });
 }
 

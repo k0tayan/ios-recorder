@@ -367,7 +367,8 @@
         NSString *fullPath = [tmpDir stringByAppendingPathComponent:file];
         NSDictionary *attrs = [fm attributesOfItemAtPath:fullPath error:nil];
         unsigned long long size = [attrs fileSize];
-        [entries addObject:[NSString stringWithFormat:@"%@:%llu", file, size]];
+        // フルパスを返し、PULL コマンドでそのまま使えるようにする
+        [entries addObject:[NSString stringWithFormat:@"%@:%llu", fullPath, size]];
     }
 
     return [NSString stringWithFormat:@"OK %@", [entries componentsJoinedByString:@" "]];

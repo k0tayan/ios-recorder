@@ -3,12 +3,14 @@
 
 #import <Foundation/Foundation.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <sys/time.h>
 
 // ファイルスコープのデバッグログ関数を定義するマクロ。
 // 呼び出しごとに static FILE* と printf 風関数を生成し、
 // tmp/ 内の指定ログファイルにタイムスタンプ付きで書き出す。
 // dispatch_once でファイルオープンをスレッドセーフに保護。
+// flockfile/funlockfile で複数スレッドからの書き込みが行単位でインターリーブしないよう保護。
 //
 // 使い方:  DEFINE_RECLOG(reclog, "iosrecorder_audio.log")
 //          reclog("hello %d", 42);
@@ -27,12 +29,14 @@ static void funcname(const char *fmt, ...) {                                    
     if (!s_##funcname##_logfile) return;                                         \
     struct timeval tv; gettimeofday(&tv, NULL);                                 \
     struct tm t; localtime_r(&tv.tv_sec, &t);                                   \
+    flockfile(s_##funcname##_logfile);                                          \
     fprintf(s_##funcname##_logfile, "%02d:%02d:%02d.%03d ",                     \
             t.tm_hour, t.tm_min, t.tm_sec, (int)(tv.tv_usec/1000));            \
     va_list ap; va_start(ap, fmt);                                              \
     vfprintf(s_##funcname##_logfile, fmt, ap);                                  \
     va_end(ap);                                                                 \
     fprintf(s_##funcname##_logfile, "\n");                                       \
+    funlockfile(s_##funcname##_logfile);                                        \
 }
 
 #endif /* RecorderLog_h */
