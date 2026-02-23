@@ -7,7 +7,7 @@
 
 DEFINE_RECLOG(reclog, "iosrecorder_audio.log")
 
-// ─── Lock-free SPSC ring buffer (RT thread → drain thread) ─────────
+// ─── ロックフリー SPSC リングバッファ (RT スレッド → drain スレッド) ──
 #define RING_SLOT_COUNT   256
 #define SLOT_MAX_BYTES    32768          // 2048 frames × 4 ch × sizeof(Float32)
 #define SLOT_MAX_BUFS     2
@@ -19,21 +19,21 @@ typedef struct {
     UInt32   numBuffers;
     UInt32   numFrames;
     uint64_t hostTime;
-    uint64_t captureTime;            // mach_absolute_time() at callback invocation
-    UInt32   formatGen;              // format generation tag (detects reconfiguration)
+    uint64_t captureTime;            // コールバック呼び出し時の mach_absolute_time()
+    UInt32   formatGen;              // フォーマット世代タグ (再構成を検出)
 } CaptureSlot;
 
 static CaptureSlot  sSlots[RING_SLOT_COUNT];
-static atomic_int   sWriteIdx;           // RT produces, drain consumes
-static atomic_int   sReadIdx;            // drain produces, RT consumes
+static atomic_int   sWriteIdx;           // RT が書き込み、drain が消費
+static atomic_int   sReadIdx;            // drain が進め、RT が空き確認
 
-// Flags readable from the RT thread without any ObjC
+// ObjC メッセージなしで RT スレッドから読めるフラグ
 static atomic_bool  sCapturing;
 static CMTime       sRecStartTime;
 static atomic_bool  sRecStartTimeSet;
-static atomic_uint  sFormatGeneration;   // incremented on each AudioUnit reconfiguration
+static atomic_uint  sFormatGeneration;   // AudioUnit 再構成ごとにインクリメント
 
-// Per-AudioUnit original callback storage (supports multiple hooked units)
+// AudioUnit 別の元コールバック保持 (複数フック対応)
 #define MAX_HOOKED_UNITS 8
 
 typedef struct {
@@ -44,18 +44,18 @@ typedef struct {
 
 static HookedUnitInfo sHookedUnits[MAX_HOOKED_UNITS];
 static int            sHookedUnitCount = 0;
-static AudioUnit      sCapturedUnit    = NULL;   // only capture audio from this unit
-static atomic_uint_fast64_t sCallbackCount;        // total render callback invocations
-static atomic_uint_fast64_t sCapturedCount;        // callbacks that passed the filter
-static atomic_uint_fast64_t sCapturedFrames;       // total audio frames captured
-static atomic_uint_fast64_t sSkippedNullCbCount;   // callbacks skipped due to NULL origCallback
-static atomic_uint_fast64_t sRingDropCount;        // callbacks dropped due to ring buffer full
-static atomic_uint_fast64_t sRingDropFrames;       // audio frames lost to ring buffer overflow
+static AudioUnit      sCapturedUnit    = NULL;   // この unit からのみ音声をキャプチャ
+static atomic_uint_fast64_t sCallbackCount;        // レンダーコールバック総呼び出し回数
+static atomic_uint_fast64_t sCapturedCount;        // フィルタを通過したコールバック数
+static atomic_uint_fast64_t sCapturedFrames;       // キャプチャした音声フレーム総数
+static atomic_uint_fast64_t sSkippedNullCbCount;   // origCallback が NULL でスキップした回数
+static atomic_uint_fast64_t sRingDropCount;        // リングバッファ満杯でドロップしたコールバック数
+static atomic_uint_fast64_t sRingDropFrames;       // リングバッファ溢れで失われた音声フレーム数
 
-// ─── RT-safe render callback wrapper ────────────────────────────────
+// ─── RT セーフなレンダーコールバックラッパー ─────────────────────
 //
-// Guarantees:  NO ObjC message sends, NO malloc/free, NO dispatch,
-//              NO locks — only memcpy + atomic load/store.
+// 保証: ObjC メッセージ送信なし、malloc/free なし、dispatch なし、
+//       ロックなし — memcpy + atomic load/store のみ。
 
 static OSStatus renderCallbackWrapper(void *inRefCon,
                                        AudioUnitRenderActionFlags *ioActionFlags,
@@ -65,15 +65,15 @@ static OSStatus renderCallbackWrapper(void *inRefCon,
                                        AudioBufferList *ioData) {
     HookedUnitInfo *info = (HookedUnitInfo *)inRefCon;
 
-    // 1. Call the correct original render callback for THIS AudioUnit
+    // 1. この AudioUnit の元のレンダーコールバックを呼ぶ
     OSStatus status = noErr;
     if (info && info->origCallback) {
         status = info->origCallback(info->origRefCon, ioActionFlags, inTimeStamp,
                                      inBusNumber, inNumberFrames, ioData);
     } else {
-        // Original callback is NULL (FMOD reconfiguration in progress).
-        // Fill with silence for speaker output, but do NOT capture — the buffer
-        // contains undefined data and encoding it shifts all subsequent audio PTS.
+        // 元コールバックが NULL (FMOD 再構成中)。
+        // スピーカー出力用に無音で埋めるが、キャプチャはしない —
+        // バッファに不定値が入っており、エンコードすると以降の音声 PTS がずれる。
         if (ioData) {
             for (UInt32 i = 0; i < ioData->mNumberBuffers; i++) {
                 memset(ioData->mBuffers[i].mData, 0, ioData->mBuffers[i].mDataByteSize);
@@ -85,29 +85,29 @@ static OSStatus renderCallbackWrapper(void *inRefCon,
         return noErr;
     }
 
-    // 2. Only capture from the designated unit (skip others)
+    // 2. 指定 unit からのみキャプチャ (他はスキップ)
     if (!info || info->unit != sCapturedUnit) return status;
 
-    // 3. Early exit if not capturing or error
+    // 3. キャプチャ中でない or エラーなら早期リターン
     if (!atomic_load_explicit(&sCapturing, memory_order_acquire)) return status;
     if (status != noErr || !ioData) return status;
 
-    // 4. Check ring buffer space (single producer — no CAS needed)
+    // 4. リングバッファの空き確認 (単一プロデューサーなので CAS 不要)
     int wi   = atomic_load_explicit(&sWriteIdx, memory_order_relaxed);
     int next = (wi + 1) % RING_SLOT_COUNT;
     if (next == atomic_load_explicit(&sReadIdx, memory_order_acquire)) {
-        // Ring full — drop this callback and record the loss
+        // リング満杯 — このコールバックをドロップしてロスを記録
         atomic_fetch_add_explicit(&sRingDropCount, 1, memory_order_relaxed);
         atomic_fetch_add_explicit(&sRingDropFrames, inNumberFrames, memory_order_relaxed);
         return status;
     }
 
-    // 5. Stats (relaxed — for diagnostics only, counted AFTER drop check)
+    // 5. 統計 (relaxed — 診断用のみ、ドロップ判定後にカウント)
     atomic_fetch_add_explicit(&sCallbackCount, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&sCapturedCount, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&sCapturedFrames, inNumberFrames, memory_order_relaxed);
 
-    // 6. Copy every AudioBuffer into the slot
+    // 6. 各 AudioBuffer をスロットにコピー
     CaptureSlot *slot = &sSlots[wi];
     UInt32 numBufs = ioData->mNumberBuffers;
     if (numBufs > SLOT_MAX_BUFS) numBufs = SLOT_MAX_BUFS;
@@ -127,13 +127,13 @@ static OSStatus renderCallbackWrapper(void *inRefCon,
     slot->captureTime = mach_absolute_time();
     slot->formatGen   = atomic_load_explicit(&sFormatGeneration, memory_order_relaxed);
 
-    // 7. Release-store: slot contents are visible before the index update
+    // 7. release-store: インデックス更新前にスロット内容が可視になる
     atomic_store_explicit(&sWriteIdx, next, memory_order_release);
 
     return status;
 }
 
-// ─── AudioUnitSetProperty hook ──────────────────────────────────────
+// ─── AudioUnitSetProperty フック ─────────────────────────────────
 static OSStatus (*orig_AudioUnitSetProperty)(AudioUnit, AudioUnitPropertyID,
                                               AudioUnitScope, AudioUnitElement,
                                               const void *, UInt32);
@@ -148,7 +148,7 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
         inScope == kAudioUnitScope_Input) {
         const AURenderCallbackStruct *cs = (const AURenderCallbackStruct *)inData;
         if (cs) {
-            // Find or create per-unit info slot
+            // unit ごとの info スロットを検索 or 新規作成
             HookedUnitInfo *info = NULL;
             for (int i = 0; i < sHookedUnitCount; i++) {
                 if (sHookedUnits[i].unit == inUnit) {
@@ -168,9 +168,9 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
 
             info->origCallback = cs->inputProc;
             info->origRefCon   = cs->inputProcRefCon;
-            sCapturedUnit = inUnit;   // always capture from the most recent unit
+            sCapturedUnit = inUnit;   // 常に最新の unit からキャプチャ
 
-            // Read format now (safe — we're in game thread, not RT)
+            // フォーマットを読み取る (ゲームスレッドなので安全、RT ではない)
             AudioStreamBasicDescription asbd = {0};
             UInt32 asbdSize = sizeof(asbd);
             OSStatus fmtSt = AudioUnitGetProperty(inUnit,
@@ -189,12 +189,12 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
                    cs->inputProc, sHookedUnitCount, sCapturedUnit,
                    capturing ? " [DURING_CAPTURE]" : "");
 
-            // Bump format generation — render callback will tag new slots
+            // フォーマット世代をインクリメント — レンダーコールバックが新スロットにタグ付けする
             atomic_fetch_add_explicit(&sFormatGeneration, 1, memory_order_release);
 
             AURenderCallbackStruct wrapper = {
                 .inputProc       = renderCallbackWrapper,
-                .inputProcRefCon = info,   // pass per-unit info to the wrapper
+                .inputProcRefCon = info,   // unit ごとの info をラッパーに渡す
             };
             return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement,
                                               &wrapper, sizeof(wrapper));
@@ -204,15 +204,15 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
                                       inData, inDataSize);
 }
 
-// ─── AudioCapture implementation ────────────────────────────────────
+// ─── AudioCapture 実装 ──────────────────────────────────────────
 @interface AudioCapture ()
 @property (nonatomic, readwrite) Float64 sampleRate;
 @property (nonatomic, readwrite) UInt32  channels;
 @property (nonatomic) dispatch_source_t  drainTimer;
 @property (nonatomic) dispatch_queue_t   drainQueue;
-@property (nonatomic) UInt32 currentFormatGen;  // last processed format generation
-@property (nonatomic) uint64_t drainSlotCount;   // total slots drained (for periodic logging)
-@property (nonatomic) uint64_t drainFrameCount;  // total frames drained
+@property (nonatomic) UInt32 currentFormatGen;  // 最後に処理したフォーマット世代
+@property (nonatomic) uint64_t drainSlotCount;   // ドレインしたスロット総数 (定期ログ用)
+@property (nonatomic) uint64_t drainFrameCount;  // ドレインしたフレーム総数
 @end
 
 @implementation AudioCapture
@@ -258,17 +258,17 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
     return YES;
 }
 
-#pragma mark - Capturing state
+#pragma mark - キャプチャ状態
 
 - (void)setCapturing:(BOOL)capturing {
     if (capturing == _capturing) return;
     _capturing = capturing;
 
     if (capturing) {
-        // Reset ring buffer before enabling
-        // NOTE: sRecStartTimeSet is NOT reset here — RecorderCore sets the
-        // recording start time BEFORE enabling capture to avoid a race where
-        // slots arrive before the start time is set (which would yield PTS=0).
+        // キャプチャ有効化前にリングバッファをリセット
+        // 注意: sRecStartTimeSet はここではリセットしない — RecorderCore が
+        // キャプチャ有効化の前に録画開始時刻をセットすることで、開始時刻が
+        // セットされる前にスロットが到着するレースを回避している (PTS=0 になる問題)。
         atomic_store_explicit(&sWriteIdx, 0, memory_order_relaxed);
         atomic_store_explicit(&sReadIdx,  0, memory_order_relaxed);
         atomic_store_explicit(&sCallbackCount, 0, memory_order_relaxed);
@@ -279,7 +279,7 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
         atomic_store_explicit(&sRingDropFrames, 0, memory_order_relaxed);
         self.drainSlotCount = 0;
         self.drainFrameCount = 0;
-        // Force format re-detection on first slot by setting to impossible value
+        // 最初のスロットでフォーマット再検出を強制 (ありえない値にセット)
         self.currentFormatGen = UINT32_MAX;
         reclog("START capturing=YES captureUnit=%p hookedUnits=%d sampleRate=%.0f ch=%u",
                sCapturedUnit, sHookedUnitCount, self.sampleRate, (unsigned)self.channels);
@@ -287,7 +287,7 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
         atomic_store_explicit(&sCapturing, true, memory_order_release);
     } else {
         atomic_store_explicit(&sCapturing, false, memory_order_release);
-        [self _stopDrainTimer];   // flushes remaining slots
+        [self _stopDrainTimer];   // 残りのスロットをフラッシュ
         uint64_t dropCount  = atomic_load(&sRingDropCount);
         uint64_t dropFrames = atomic_load(&sRingDropFrames);
         reclog("STOP callbacks=%llu captured=%llu frames=%llu skippedNull=%llu ringDrops=%llu droppedFrames=%llu",
@@ -313,7 +313,7 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
     if (sCapturedUnit) {
         AudioStreamBasicDescription asbd;
         UInt32 size = sizeof(asbd);
-        // Read Input scope first (render callback format), fall back to Output
+        // まず Input スコープ (レンダーコールバックのフォーマット) を読み、失敗なら Output にフォールバック
         OSStatus st = AudioUnitGetProperty(sCapturedUnit,
                                             kAudioUnitProperty_StreamFormat,
                                             kAudioUnitScope_Input,
@@ -333,7 +333,7 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
     }
 }
 
-#pragma mark - Drain timer
+#pragma mark - Drain タイマー
 
 - (void)_startDrainTimer {
     dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(
@@ -345,8 +345,8 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
         DISPATCH_SOURCE_TYPE_TIMER, 0, 0, self.drainQueue);
     dispatch_source_set_timer(self.drainTimer,
                               DISPATCH_TIME_NOW,
-                              2 * NSEC_PER_MSEC,   // 2 ms interval
-                              0);                    // no leeway
+                              2 * NSEC_PER_MSEC,   // 2ms 間隔
+                              0);                    // leeway なし
 
     __weak typeof(self) weakSelf = self;
     dispatch_source_set_event_handler(self.drainTimer, ^{
@@ -361,7 +361,7 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
         self.drainTimer = nil;
     }
     if (self.drainQueue) {
-        // Wait for any in-flight handler, then flush remaining slots
+        // 実行中のハンドラ完了を待ち、残りのスロットをフラッシュ
         dispatch_sync(self.drainQueue, ^{
             [self _drainRingBuffer];
         });
@@ -376,7 +376,7 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
     while (ri != wi) {
         CaptureSlot *slot = &sSlots[ri];
 
-        // Per-slot format generation check — reconfigure BEFORE processing new-format data
+        // スロットごとのフォーマット世代チェック — 新フォーマットのデータ処理前に再構成
         if (slot->formatGen != self.currentFormatGen) {
             Float64 oldRate = self.sampleRate;
             UInt32  oldCh   = self.channels;
@@ -399,9 +399,9 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
             }
         }
 
-        // Compute PTS from wall-clock time (mach_absolute_time at callback),
-        // matching the video timebase. slot->hostTime is the speaker playout
-        // time and can be ~1s in the future, causing audio-video desync.
+        // 壁時計時刻 (コールバック時の mach_absolute_time) から PTS を算出。
+        // 映像タイムベースに合わせる。slot->hostTime はスピーカー再生時刻で
+        // 最大 ~1s 先にあり、音声映像のずれを引き起こす。
         CMTime hostCMTime = CMClockMakeHostTimeFromSystemUnits(slot->captureTime);
         CMTime pts;
         if (atomic_load_explicit(&sRecStartTimeSet, memory_order_acquire)) {
@@ -410,7 +410,7 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
             pts = kCMTimeZero;
         }
 
-        // Reconstruct AudioBufferList on the stack (points into slot data)
+        // スタック上に AudioBufferList を再構築 (スロットデータを指す)
         struct {
             UInt32      mNumberBuffers;
             AudioBuffer mBuffers[SLOT_MAX_BUFS];
@@ -425,7 +425,7 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
             off += slot->bufByteSize[i];
         }
 
-        // Deliver synchronously — delegate MUST consume data before returning
+        // 同期配信 — デリゲートは返る前にデータを消費しなければならない
         id<AudioCaptureDelegate> del = self.delegate;
         if (del) {
             [del audioCapture:self
@@ -437,23 +437,23 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
         self.drainSlotCount++;
         self.drainFrameCount += slot->numFrames;
 
-        // Diagnostic: log first 20 slots to measure hostTime vs captureTime offset
+        // 診断: 最初の 20 スロットで hostTime と captureTime のオフセットを計測
         if (self.drainSlotCount <= 20) {
             CMTime origHostCMTime = CMClockMakeHostTimeFromSystemUnits(slot->hostTime);
             double hostSec = CMTimeGetSeconds(origHostCMTime);
-            double captureSec = CMTimeGetSeconds(hostCMTime);  // hostCMTime is now captureTime-based
-            double offsetSec = hostSec - captureSec;  // positive = hostTime is in the future
+            double captureSec = CMTimeGetSeconds(hostCMTime);  // hostCMTime は captureTime ベース
+            double offsetSec = hostSec - captureSec;  // 正 = hostTime が未来
             reclog("SLOT#%llu hostTime=%.4f captureTime=%.4f offset=%.4fs pts=%.3f frames=%u",
                    (unsigned long long)self.drainSlotCount,
                    hostSec, captureSec, offsetSec,
                    CMTimeGetSeconds(pts), slot->numFrames);
         }
-        // Log every ~1s worth of audio (48000/512 ≈ 94 callbacks)
+        // ~1秒分の音声ごとにログ (48000/512 ≈ 94 コールバック)
         if (self.drainSlotCount % 100 == 0) {
             CMTime origHostCMTime = CMClockMakeHostTimeFromSystemUnits(slot->hostTime);
             double hostSec = CMTimeGetSeconds(origHostCMTime);
             double captureSec = CMTimeGetSeconds(hostCMTime);
-            double hostVsCapture = hostSec - captureSec;  // positive = hostTime is in the future
+            double hostVsCapture = hostSec - captureSec;  // 正 = hostTime が未来
 
             reclog("DRAIN slot#%llu totalFrames=%llu pts=%.3f hostVsCapture=%.4f numFrames=%u",
                    (unsigned long long)self.drainSlotCount,
@@ -461,7 +461,7 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
                    CMTimeGetSeconds(pts), hostVsCapture, slot->numFrames);
         }
 
-        // Advance read index (release-store so the RT producer sees free space)
+        // 読み取りインデックスを進める (release-store で RT プロデューサーに空きを通知)
         ri = (ri + 1) % RING_SLOT_COUNT;
         atomic_store_explicit(&sReadIdx, ri, memory_order_release);
     }

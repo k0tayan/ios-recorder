@@ -8,7 +8,7 @@
 
 static ControlServer *controlServer = nil;
 
-// Hook CAMetalLayer's nextDrawable to capture Metal frames
+// CAMetalLayer の nextDrawable をフックして Metal フレームをキャプチャ
 %hook CAMetalLayer
 
 - (id<CAMetalDrawable>)nextDrawable {
@@ -27,15 +27,15 @@ static ControlServer *controlServer = nil;
         NSLog(@"[Recorder] iOS App Recorder dylib loaded!");
         NSLog(@"[Recorder] ========================================");
 
-        // Initialize RecorderCore singleton
+        // RecorderCore シングルトン初期化
         [RecorderCore shared];
         NSLog(@"[Recorder] RecorderCore initialized");
 
-        // Initialize FrameCapture
+        // FrameCapture 初期化
         [FrameCapture shared];
         NSLog(@"[Recorder] FrameCapture initialized");
 
-        // Initialize AudioCapture and install hooks
+        // AudioCapture 初期化 & フックのインストール
         AudioCapture *audioCapture = [AudioCapture shared];
         if ([audioCapture installHook]) {
             NSLog(@"[Recorder] AudioCapture hooks installed");
@@ -43,7 +43,7 @@ static ControlServer *controlServer = nil;
             NSLog(@"[Recorder] WARNING: AudioCapture hook installation failed");
         }
 
-        // Start ControlServer on TCP port
+        // TCP ControlServer 起動
         controlServer = [[ControlServer alloc] initWithPort:8190];
         if ([controlServer start]) {
             NSLog(@"[Recorder] ControlServer started on port 8190");

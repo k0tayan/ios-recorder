@@ -3,10 +3,9 @@
 
 DEFINE_RECLOG(vreclog, "iosrecorder_video.log")
 
-// Max frames queued for async encoding.  Metal's drawable pool has ~3
-// surfaces; keeping the queue shallow ensures each IOSurface-backed pixel
-// buffer is encoded before Metal can reuse it (~25 ms at 120 Hz), while
-// almost never blocking the render thread.
+// 非同期エンコードのキュー深度上限。Metal の drawable プールは ~3 サーフェスなので、
+// キューを浅く保つことで IOSurface バックの pixel buffer が Metal に再利用される前に
+// エンコードされる (~25ms @120Hz)。レンダースレッドをほぼブロックしない。
 #define ENCODER_QUEUE_DEPTH 2
 
 @interface VideoEncoder ()
@@ -35,7 +34,7 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
     VideoEncoder *encoder = (__bridge VideoEncoder *)outputCallbackRefCon;
     encoder.outputCount++;
 
-    // Log every 100th output frame for PTS tracking
+    // 100 フレームごとに PTS 追跡用ログ
     if (encoder.outputCount % 100 == 1) {
         CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
         vreclog("VT_OUT #%lld pts=%.3f", (long long)encoder.outputCount, CMTimeGetSeconds(pts));
@@ -73,8 +72,8 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
         self.width,
         self.height,
         kCMVideoCodecType_HEVC,
-        NULL,  // encoderSpecification
-        NULL,  // sourceImageBufferAttributes
+        NULL,
+        NULL,
         kCFAllocatorDefault,
         videoEncoderOutputCallback,
         (__bridge void *)self,
@@ -86,7 +85,7 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
         return NO;
     }
 
-    // Configure session properties
+    // セッションプロパティ設定
     VTSessionSetProperty(self.session, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
     VTSessionSetProperty(self.session, kVTCompressionPropertyKey_ProfileLevel,
                          kVTProfileLevel_HEVC_Main_AutoLevel);
@@ -96,7 +95,7 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
     VTSessionSetProperty(self.session, kVTCompressionPropertyKey_AverageBitRate, bitrateRef);
     CFRelease(bitrateRef);
 
-    // Data rate limits: [bytes per second, duration in seconds]
+    // データレート制限: [バイト/秒, 期間(秒)]
     int bytesPerSecond = self.bitrate / 8;
     double limitDuration = 1.0;
     CFNumberRef bytesRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &bytesPerSecond);
@@ -150,13 +149,12 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
         return;
     }
 
-    // Non-blocking queue depth check.  If fewer than ENCODER_QUEUE_DEPTH
-    // frames are pending, the semaphore returns immediately.  If the queue
-    // is full, we DROP this frame rather than blocking the render thread —
-    // this keeps the game running at full 120fps while ensuring IOSurface-
-    // backed pixel buffers are encoded before Metal recycles them.
+    // ノンブロッキングのキュー深度チェック。ENCODER_QUEUE_DEPTH 未満のフレームが
+    // 保留中ならセマフォは即時リターン。キュー満杯時はレンダースレッドをブロック
+    // せずフレームをドロップ — ゲームは 120fps で動き続け、IOSurface バックの
+    // pixel buffer は Metal が再利用する前にエンコードされる。
     if (dispatch_semaphore_wait(self.encoderSemaphore, DISPATCH_TIME_NOW) != 0) {
-        return;  // queue full — skip frame to keep render thread smooth
+        return;  // キュー満杯 — レンダースレッドの滑らかさのためフレームをスキップ
     }
 
     CVPixelBufferRetain(pixelBuffer);
@@ -185,8 +183,8 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
         return;
     }
 
-    // Dispatch stop to the encoder queue so the (at most ENCODER_QUEUE_DEPTH)
-    // pending encode blocks finish first, then flush and tear down.
+    // エンコーダーキューに stop をディスパッチし、保留中の (最大 ENCODER_QUEUE_DEPTH 個の)
+    // エンコードブロックを先に完了させてからフラッシュ & 破棄する。
     dispatch_async(self.encoderQueue, ^{
         self.isRunning = NO;
         if (self.session) {

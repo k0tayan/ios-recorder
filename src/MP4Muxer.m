@@ -42,7 +42,7 @@
     NSError *error = nil;
     NSURL *outputURL = [NSURL fileURLWithPath:self.outputPath];
 
-    // Remove existing file
+    // 既存ファイルを削除
     [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
 
     self.writer = [[AVAssetWriter alloc] initWithURL:outputURL
@@ -53,7 +53,7 @@
         return NO;
     }
 
-    // Video input — passthrough HEVC with format hint
+    // 映像入力 — HEVC パススルー (フォーマットヒント付き)
     CMVideoFormatDescriptionRef videoFmt = NULL;
     CMVideoFormatDescriptionCreate(kCFAllocatorDefault,
                                     kCMVideoCodecType_HEVC,
@@ -75,11 +75,11 @@
         return NO;
     }
 
-    // Audio input — passthrough AAC with format hint
+    // 音声入力 — AAC パススルー (フォーマットヒント付き)
     CMAudioFormatDescriptionRef audioFmt = self.audioFormatDescription;
     BOOL ownedAudioFmt = NO;
     if (!audioFmt) {
-        // Fallback: create a minimal format hint (no magic cookie)
+        // フォールバック: 最小限のフォーマットヒント (magic cookie なし)
         AudioStreamBasicDescription aacDesc = {
             .mFormatID         = kAudioFormatMPEG4AAC,
             .mSampleRate       = self.audioSampleRate,
@@ -156,7 +156,7 @@
             return;
         }
 
-        // Start session from audio if it arrives before video
+        // 映像より先に音声が到着した場合、音声からセッション開始
         if (!self.sessionStarted) {
             CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
             [self.writer startSessionAtSourceTime:pts];

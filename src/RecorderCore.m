@@ -33,7 +33,7 @@
         _videoBitrate = 16000000;
         _audioBitrate = 128000;
         _maxCaptureSize = CGSizeMake(2060, 1440);
-        // Listen for background transition
+        // バックグラウンド遷移を監視
         [[NSNotificationCenter defaultCenter]
             addObserverForName:UIApplicationDidEnterBackgroundNotification
                         object:nil queue:nil
@@ -56,21 +56,21 @@
 
     NSLog(@"[Recorder] Starting recording...");
 
-    // Generate output path
+    // 出力パス生成
     NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
     formatter.dateFormat = @"yyyyMMdd_HHmmss";
     NSString *timestamp = [formatter stringFromDate:[NSDate date]];
     self.currentOutputPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
                               [NSString stringWithFormat:@"recording_%@.mp4", timestamp]];
 
-    // Get capture size from FrameCapture
+    // FrameCapture からキャプチャサイズを取得
     CGSize captureSize = [FrameCapture shared].captureSize;
     if (captureSize.width == 0 || captureSize.height == 0) {
-        // Default size if not yet determined (iPad 4:3)
+        // 未決定の場合のデフォルトサイズ (iPad 4:3)
         captureSize = self.maxCaptureSize;
     }
 
-    // Scale down if exceeds max
+    // 最大サイズを超える場合は縮小
     int width = (int)captureSize.width;
     int height = (int)captureSize.height;
     if (width > self.maxCaptureSize.width || height > self.maxCaptureSize.height) {
@@ -79,31 +79,31 @@
         float scale = fminf(scaleW, scaleH);
         width = (int)(width * scale);
         height = (int)(height * scale);
-        // Ensure even dimensions for H.264
+        // H.264 用に偶数を保証
         width = width & ~1;
         height = height & ~1;
     }
 
-    // Initialize VideoEncoder
+    // VideoEncoder 初期化
     self.videoEncoder = [[VideoEncoder alloc] initWithWidth:width
                                                     height:height
                                                        fps:self.targetFPS
                                                    bitrate:self.videoBitrate];
 
-    // Initialize AudioEncoder
+    // AudioEncoder 初期化
     AudioCapture *audioCapture = [AudioCapture shared];
     [audioCapture updateAudioFormat];
     self.audioEncoder = [[AudioEncoder alloc] initWithSampleRate:audioCapture.sampleRate
                                                         channels:audioCapture.channels
                                                          bitrate:self.audioBitrate];
-    // Initialize MP4Muxer
+    // MP4Muxer 初期化
     self.muxer = [[MP4Muxer alloc] initWithOutputPath:self.currentOutputPath
                                                 width:width
                                                height:height
                                       audioSampleRate:audioCapture.sampleRate
                                         audioChannels:audioCapture.channels];
 
-    // Wire up callbacks
+    // コールバック接続
     __weak MP4Muxer *weakMuxer = self.muxer;
     self.videoEncoder.onEncodedSample = ^(CMSampleBufferRef sampleBuffer) {
         [weakMuxer appendVideoSample:sampleBuffer];
@@ -112,7 +112,7 @@
         [weakMuxer appendAudioSample:sampleBuffer];
     };
 
-    // Start all components
+    // 全コンポーネント開始
     if (![self.videoEncoder start]) {
         NSLog(@"[Recorder] Failed to start VideoEncoder");
         return;
@@ -123,8 +123,8 @@
         return;
     }
 
-    // Pass the encoder's format description (with magic cookie) to the muxer
-    // so AVAssetWriter can write a correct esds box and codec tag.
+    // エンコーダのフォーマット記述 (magic cookie 付き) を muxer に渡して
+    // AVAssetWriter が正しい esds box とコーデックタグを書けるようにする。
     self.muxer.audioFormatDescription = self.audioEncoder.audioFormatDescription;
 
     if (![self.muxer start]) {
@@ -134,10 +134,10 @@
         return;
     }
 
-    // Record start time
+    // 録画開始時刻を記録
     self.recordingStartTime = CMClockGetTime(CMClockGetHostTimeClock());
 
-    // Configure capture components
+    // キャプチャコンポーネントの設定
     FrameCapture *frameCapture = [FrameCapture shared];
     frameCapture.targetFPS = self.targetFPS;
     frameCapture.delegate = self;
@@ -163,18 +163,18 @@
 
     NSLog(@"[Recorder] Stopping recording...");
 
-    // Stop capturing first (flushes remaining data to delegate), then disconnect.
-    // IMPORTANT: keep isRecording = YES during the drain so that the delegate
-    // callbacks still forward data to the encoders.  Setting it to NO before
-    // the drain caused the final ring-buffer flush to be silently discarded.
+    // まずキャプチャを停止 (残りデータをデリゲートにフラッシュ) し、切断する。
+    // 重要: drain 中は isRecording = YES を保持し、デリゲートコールバックが
+    // エンコーダにデータを転送し続けるようにする。drain 前に NO にすると
+    // 最後のリングバッファフラッシュが無視されていた。
     [FrameCapture shared].capturing = NO;
     [FrameCapture shared].delegate = nil;
-    [AudioCapture shared].capturing = NO;   // synchronous drain with isRecording still YES
+    [AudioCapture shared].capturing = NO;   // isRecording = YES のまま同期 drain
     [AudioCapture shared].delegate = nil;
 
     self.isRecording = NO;
 
-    // Stop encoders, then finalize muxer
+    // エンコーダを停止してから muxer をファイナライズ
     __weak typeof(self) weakSelf = self;
     [self.videoEncoder stopWithCompletion:^{
         [weakSelf.audioEncoder stopWithCompletion:^{
@@ -210,7 +210,7 @@
             continue;
         }
 
-        // NSIRD_ProductName_* directories
+        // NSIRD_ProductName_* ディレクトリ
         if (isDir && [name hasPrefix:@"NSIRD_"]) {
             NSDictionary *attrs = [fm attributesOfItemAtPath:fullPath error:nil];
             freedBytes += [attrs fileSize];
@@ -219,7 +219,7 @@
             continue;
         }
 
-        // 0-byte recording_*.mp4 (failed recordings)
+        // 0バイトの recording_*.mp4 (失敗した録画)
         if ([name hasPrefix:@"recording_"] && [name hasSuffix:@".mp4"]) {
             NSDictionary *attrs = [fm attributesOfItemAtPath:fullPath error:nil];
             unsigned long long size = [attrs fileSize];
@@ -228,7 +228,7 @@
                 deletedCount++;
                 continue;
             }
-            // Non-zero recordings that are not currently being recorded
+            // 現在録画中でない非ゼロの録画ファイル
             if (![fullPath isEqualToString:self.currentOutputPath] || !self.isRecording) {
                 freedBytes += size;
                 [fm removeItemAtPath:fullPath error:nil];

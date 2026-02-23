@@ -3,7 +3,7 @@
 #import <mach/mach_time.h>
 #import <objc/message.h>
 
-// Typedef for objc_msgSend returning IOSurfaceRef
+// IOSurfaceRef を返す objc_msgSend の型定義
 typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
 
 @interface FrameCapture ()
@@ -53,8 +53,8 @@ typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
     }
 
     @try {
-        // Frame rate control (use 0.85x threshold to reliably capture
-        // every other frame from 120Hz source for 60fps target)
+        // フレームレート制御 (120Hz ソースから 60fps 目標で確実に
+        // 1フレームおきにキャプチャするため 0.85x 閾値を使用)
         uint64_t now = mach_absolute_time();
         if (self.lastCaptureTime != 0) {
             double elapsed = (double)(now - self.lastCaptureTime) / self.ticksPerSecond;
@@ -64,13 +64,13 @@ typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
         }
         self.lastCaptureTime = now;
 
-        // Get texture
+        // テクスチャ取得
         id<MTLTexture> texture = drawable.texture;
         if (!texture) {
             return;
         }
 
-        // Access IOSurface via objc_msgSend (private API, returns CFTypeRef not ObjC object)
+        // objc_msgSend 経由で IOSurface にアクセス (private API、ObjC オブジェクトではなく CFTypeRef を返す)
         SEL iosurfaceSel = sel_registerName("iosurface");
         if (![texture respondsToSelector:iosurfaceSel]) {
             NSLog(@"[Recorder] Texture does not respond to iosurface");
@@ -82,10 +82,10 @@ typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
             return;
         }
 
-        // Update capture size
+        // キャプチャサイズ更新
         _captureSize = CGSizeMake(texture.width, texture.height);
 
-        // Create CVPixelBuffer from IOSurface (without locking - zero copy)
+        // IOSurface から CVPixelBuffer を生成 (ロックなし・ゼロコピー)
         CVPixelBufferRef pixelBuffer = NULL;
         NSDictionary *attrs = @{
             (__bridge NSString *)kCVPixelBufferIOSurfacePropertiesKey: @{}
@@ -101,14 +101,14 @@ typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
             return;
         }
 
-        // Calculate PTS from monotonic host clock (same timebase as audio)
+        // モノトニックホストクロックから PTS を算出 (音声と同じタイムベース)
         CMTime currentTime = CMClockMakeHostTimeFromSystemUnits(now);
         CMTime pts = self.startTimeSet ? CMTimeSubtract(currentTime, self.recordingStartTime) : kCMTimeZero;
 
-        // Notify delegate
+        // デリゲートに通知
         [self.delegate frameCapture:self didCapturePixelBuffer:pixelBuffer timestamp:pts];
 
-        // Cleanup
+        // 解放
         CVPixelBufferRelease(pixelBuffer);
     } @catch (NSException *e) {
         NSLog(@"[Recorder] captureDrawable exception: %@ %@", e.name, e.reason);

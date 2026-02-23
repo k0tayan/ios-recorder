@@ -4,8 +4,8 @@
 
 @interface MP4Muxer : NSObject
 
-/// Set before calling -start to provide a complete audio format hint
-/// (including magic cookie / AudioSpecificConfig).
+/// -start を呼ぶ前にセットして、完全な音声フォーマットヒント
+/// (magic cookie / AudioSpecificConfig を含む) を提供する。
 @property (nonatomic) CMAudioFormatDescriptionRef audioFormatDescription;
 
 - (instancetype)initWithOutputPath:(NSString *)path

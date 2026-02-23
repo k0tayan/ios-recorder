@@ -5,12 +5,12 @@
 #include <stdarg.h>
 #include <sys/time.h>
 
-// Macro to declare a file-scoped debug logging function.
-// Each invocation creates a static FILE* and a printf-like function
-// that writes timestamped lines to the specified log file in tmp/.
+// ファイルスコープのデバッグログ関数を定義するマクロ。
+// 呼び出しごとに static FILE* と printf 風関数を生成し、
+// tmp/ 内の指定ログファイルにタイムスタンプ付きで書き出す。
 //
-// Usage:  DEFINE_RECLOG(reclog, "iosrecorder_audio.log")
-//         reclog("hello %d", 42);
+// 使い方:  DEFINE_RECLOG(reclog, "iosrecorder_audio.log")
+//          reclog("hello %d", 42);
 
 #define DEFINE_RECLOG(funcname, filename)                                       \
 static FILE *s_##funcname##_logfile = NULL;                                     \

@@ -11,35 +11,35 @@ DEFINE_RECLOG(aenclog, "iosrecorder_aenc.log")
 @property (nonatomic) dispatch_queue_t encoderQueue;
 @property (nonatomic) BOOL isRunning;
 
-// Ring buffer for accumulating PCM samples
+// PCM サンプル蓄積用リングバッファ
 @property (nonatomic) uint8_t *ringBuffer;
 @property (nonatomic) UInt32 ringBufferSize;
 @property (nonatomic) UInt32 ringBufferReadPos;
 @property (nonatomic) UInt32 ringBufferWritePos;
 @property (nonatomic) UInt32 ringBufferAvailable;
 
-// PTS tracking: anchor + frame counting
-@property (nonatomic) CMTime firstTimestamp;          // wall-clock PTS of first audio sample
-@property (nonatomic) CMTime firstWallTime;           // CMClockGetHostTimeClock at first encode (for drift measurement)
+// PTS 追跡: アンカー + フレームカウント
+@property (nonatomic) CMTime firstTimestamp;          // 最初の音声サンプルの壁時計 PTS
+@property (nonatomic) CMTime firstWallTime;           // 最初のエンコード時の CMClockGetHostTimeClock (ドリフト計測用)
 @property (nonatomic) BOOL ptsInitialized;
-@property (nonatomic) int64_t totalFramesEncoded;     // AAC frames encoded (for PTS calculation)
-@property (nonatomic) UInt32 primingSamples;           // AAC encoder priming delay in samples
+@property (nonatomic) int64_t totalFramesEncoded;     // エンコード済み AAC フレーム数 (PTS 計算用)
+@property (nonatomic) UInt32 primingSamples;           // AAC エンコーダのプライミング遅延 (サンプル数)
 
-// Temporary buffer for encoder input
+// エンコーダ入力用一時バッファ
 @property (nonatomic) uint8_t *encoderInputBuffer;
 @property (nonatomic) UInt32 encoderInputBufferSize;
 
-// Output buffer
+// 出力バッファ
 @property (nonatomic) uint8_t *aacOutputBuffer;
 @property (nonatomic) UInt32 aacOutputBufferSize;
 
-// Audio format descriptions
+// 音声フォーマット記述
 @property (nonatomic) AudioStreamBasicDescription inputFormat;
 @property (nonatomic) AudioStreamBasicDescription outputFormat;
 @property (nonatomic) CMAudioFormatDescriptionRef audioFormatDescription;
 @end
 
-// Callback for AudioConverter to request input data
+// AudioConverter が入力データを要求するコールバック
 static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
                                              UInt32 *ioNumberDataPackets,
                                              AudioBufferList *ioData,
@@ -56,7 +56,7 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
         return -1;
     }
 
-    // Copy from ring buffer to encoder input buffer
+    // リングバッファからエンコーダ入力バッファにコピー
     UInt32 bytesToCopy = requestedBytes;
     UInt32 readPos = encoder.ringBufferReadPos;
 
@@ -93,20 +93,20 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
         _isRunning = NO;
         _encoderQueue = dispatch_queue_create("com.local.iosrecorder.audioencoder", DISPATCH_QUEUE_SERIAL);
 
-        // Ring buffer: hold up to 1 second of audio
+        // リングバッファ: 2秒分の音声を保持
         UInt32 bytesPerFrame = channels * sizeof(Float32);
-        _ringBufferSize = (UInt32)(sampleRate * bytesPerFrame * 2);  // 2 seconds buffer
+        _ringBufferSize = (UInt32)(sampleRate * bytesPerFrame * 2);
         _ringBuffer = (uint8_t *)calloc(1, _ringBufferSize);
         _ringBufferReadPos = 0;
         _ringBufferWritePos = 0;
         _ringBufferAvailable = 0;
 
-        // Encoder input buffer: 1024 frames (AAC frame size)
+        // エンコーダ入力バッファ: 1024 フレーム (AAC フレームサイズ)
         _encoderInputBufferSize = 1024 * bytesPerFrame;
         _encoderInputBuffer = (uint8_t *)malloc(_encoderInputBufferSize);
 
-        // AAC output buffer
-        _aacOutputBufferSize = 1024 * channels * 2;  // generous output buffer
+        // AAC 出力バッファ
+        _aacOutputBufferSize = 1024 * channels * 2;  // 余裕を持った出力バッファ
         _aacOutputBuffer = (uint8_t *)malloc(_aacOutputBufferSize);
     }
     return self;
@@ -145,7 +145,7 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
     AudioConverterGetProperty(self.converter, kAudioConverterCurrentOutputStreamDescription,
                                &size, &_outputFormat);
 
-    // Get magic cookie (AudioSpecificConfig) for proper esds box
+    // magic cookie (AudioSpecificConfig) を取得して正しい esds box を生成
     UInt32 cookieSize = 0;
     void *cookie = NULL;
     OSStatus cookieStatus = AudioConverterGetPropertyInfo(
@@ -162,14 +162,14 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
                                     NULL, &_audioFormatDescription);
     if (cookie) free(cookie);
 
-    // Query encoder priming delay (leadingFrames to be trimmed by decoder)
+    // エンコーダのプライミング遅延を取得 (デコーダがトリムする leadingFrames)
     AudioConverterPrimeInfo primeInfo = {0};
     UInt32 primeSize = sizeof(primeInfo);
     if (AudioConverterGetProperty(_converter, kAudioConverterPrimeInfo,
                                    &primeSize, &primeInfo) == noErr) {
         self.primingSamples = primeInfo.leadingFrames;
     } else {
-        self.primingSamples = 2112; // default for AAC-LC
+        self.primingSamples = 2112; // AAC-LC のデフォルト
     }
 
     return YES;
@@ -231,11 +231,11 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
         NSLog(@"[Recorder] AudioEncoder reconfiguring: %.0fHz/%uch → %.0fHz/%uch",
               self.sampleRate, (unsigned)self.channels, sampleRate, (unsigned)channels);
 
-        // Encode remaining data with old settings
+        // 旧設定で残りデータをエンコード
         [self _encodeAvailableFrames];
         [self _disposeConverter];
 
-        // Log PTS state before reset to detect discontinuities
+        // 不連続検出のためリセット前の PTS 状態をログ
         if (self.ptsInitialized) {
             int64_t lastSampleOffset = (int64_t)self.totalFramesEncoded * 1024 - (int64_t)self.primingSamples;
             double lastPTS = CMTimeGetSeconds(self.firstTimestamp) + (double)lastSampleOffset / self.sampleRate;
@@ -243,7 +243,7 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
                     lastPTS, CMTimeGetSeconds(self.firstTimestamp), (long long)self.totalFramesEncoded);
         }
 
-        // Update format and reallocate buffers
+        // フォーマット更新 & バッファ再割り当て
         self.sampleRate = sampleRate;
         self.channels = channels;
         [self _reallocateBuffers];
@@ -253,7 +253,7 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
             return;
         }
 
-        // Reset PTS tracking for new format
+        // 新フォーマット用に PTS 追跡をリセット
         self.ptsInitialized = NO;
         self.totalFramesEncoded = 0;
 
@@ -267,9 +267,9 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
               timestamp:(CMTime)timestamp {
     if (!self.isRunning) return;
 
-    // dispatch_sync: caller's bufferList must stay valid until data is copied
-    // into our ring buffer.  The drain thread blocks here briefly while the
-    // encoder queue copies + encodes — this is intentional.
+    // dispatch_sync: 呼び出し元の bufferList はデータがリングバッファに
+    // コピーされるまで有効でなければならない。drain スレッドはエンコーダー
+    // キューがコピー + エンコードする間一時的にブロックされる — これは意図的。
     dispatch_sync(self.encoderQueue, ^{
         if (!self.ptsInitialized) {
             self.firstTimestamp = timestamp;
@@ -294,11 +294,11 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
     UInt32 bytesPerFrame = self.channels * sizeof(Float32);
 
     if (bufferList->mNumberBuffers == 1) {
-        // Interleaved: copy directly
+        // インターリーブ: そのままコピー
         UInt32 bytesToWrite = numFrames * bytesPerFrame;
         [self _writeToRingBuffer:bufferList->mBuffers[0].mData length:bytesToWrite];
     } else {
-        // Non-interleaved: interleave the data
+        // 非インターリーブ: インターリーブして格納
         UInt32 bytesPerSample = sizeof(Float32);
         for (UInt32 frame = 0; frame < numFrames; frame++) {
             for (UInt32 ch = 0; ch < bufferList->mNumberBuffers && ch < self.channels; ch++) {
@@ -311,7 +311,7 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
 
 - (void)_writeToRingBuffer:(const void *)data length:(UInt32)length {
     if (self.ringBufferAvailable + length > self.ringBufferSize) {
-        // Buffer overflow - drop oldest data
+        // バッファオーバーフロー — データをドロップ
         NSLog(@"[Recorder] Audio ring buffer overflow, dropping data");
         return;
     }
@@ -336,7 +336,7 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
     UInt32 bytesPerAACFrame = 1024 * bytesPerFrame;
 
     while (self.ringBufferAvailable >= bytesPerAACFrame) {
-        // Prepare output buffer
+        // 出力バッファ準備
         AudioBufferList outputBufferList;
         outputBufferList.mNumberBuffers = 1;
         outputBufferList.mBuffers[0].mNumberChannels = self.channels;
@@ -360,8 +360,8 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
         }
 
         // PTS = firstTimestamp + (frameIndex × 1024 − primingSamples) / sampleRate
-        // Subtracting priming compensates for the AAC encoder's priming delay so that
-        // the decoder's output aligns with the original capture time.
+        // priming を引くことで AAC エンコーダのプライミング遅延を補償し、
+        // デコーダの出力を元のキャプチャ時刻に合わせる。
         int64_t sampleOffset = (int64_t)self.totalFramesEncoded * 1024 - (int64_t)self.primingSamples;
         CMTime pts = CMTimeAdd(self.firstTimestamp,
             CMTimeMakeWithSeconds((double)sampleOffset / self.sampleRate, (int32_t)self.sampleRate));
@@ -417,7 +417,7 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
         CFRelease(blockBuffer);
 
         if (status == noErr && sampleBuffer && self.onEncodedSample) {
-            // Log every 50th AAC frame (~1s intervals) for PTS tracking + drift measurement
+            // 50 AAC フレームごと (~1秒間隔) に PTS 追跡 + ドリフト計測をログ
             if (self.totalFramesEncoded % 50 == 1) {
                 double ptsElapsed = CMTimeGetSeconds(pts) - CMTimeGetSeconds(self.firstTimestamp);
                 CMTime nowWall = CMClockGetTime(CMClockGetHostTimeClock());
@@ -445,7 +445,7 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
     self.isRunning = NO;
 
     dispatch_async(self.encoderQueue, ^{
-        // Encode any remaining samples
+        // 残りのサンプルをエンコード
         [self _encodeAvailableFrames];
         [self _disposeConverter];
 

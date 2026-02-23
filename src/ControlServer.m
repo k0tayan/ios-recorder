@@ -26,21 +26,21 @@
 }
 
 - (BOOL)start {
-    // Ignore SIGPIPE to prevent crash when client disconnects during write
+    // SIGPIPE を無視 (クライアント切断時の write でクラッシュ防止)
     signal(SIGPIPE, SIG_IGN);
 
-    // Create socket
+    // ソケット作成
     self.serverFd = socket(AF_INET, SOCK_STREAM, 0);
     if (self.serverFd < 0) {
         NSLog(@"[Recorder] Failed to create socket: %s", strerror(errno));
         return NO;
     }
 
-    // Allow port reuse (avoid "address already in use" after app restart)
+    // ポート再利用を許可 (アプリ再起動後の "address already in use" 回避)
     int reuse = 1;
     setsockopt(self.serverFd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
-    // Bind
+    // バインド
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -54,7 +54,7 @@
         return NO;
     }
 
-    // Listen
+    // リスン
     if (listen(self.serverFd, 5) < 0) {
         NSLog(@"[Recorder] Failed to listen on port %u: %s", self.port, strerror(errno));
         close(self.serverFd);
@@ -65,7 +65,7 @@
     self.running = YES;
     NSLog(@"[Recorder] ControlServer listening on port %u", self.port);
 
-    // Accept loop in background
+    // バックグラウンドで accept ループ
     dispatch_async(self.serverQueue, ^{
         [self _acceptLoop];
     });
@@ -86,7 +86,7 @@
             continue;
         }
 
-        // Handle client in a new dispatch
+        // 新しい dispatch でクライアントを処理
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             [self _handleClient:clientFd];
         });
@@ -103,7 +103,7 @@
 
     buffer[bytesRead] = '\0';
 
-    // Strip trailing newline
+    // 末尾の改行を除去
     char *newline = strchr(buffer, '\n');
     if (newline) *newline = '\0';
     newline = strchr(buffer, '\r');
@@ -114,14 +114,14 @@
 
     NSString *upperCommand = [command uppercaseString];
 
-    // PULL command: binary file transfer (handled separately)
+    // PULL コマンド: バイナリファイル転送 (別処理)
     if ([upperCommand hasPrefix:@"PULL "]) {
         NSString *path = [command substringFromIndex:5];
         [self _handlePull:path clientFd:clientFd];
         return;
     }
 
-    // LIST command: enumerate recordings
+    // LIST コマンド: 録画ファイル一覧
     if ([upperCommand isEqualToString:@"LIST"]) {
         NSString *response = [self _handleList];
         NSString *responseWithNewline = [response stringByAppendingString:@"\n"];
@@ -133,7 +133,7 @@
 
     NSString *response = [self _processCommand:command];
 
-    // Send response
+    // レスポンス送信
     NSString *responseWithNewline = [response stringByAppendingString:@"\n"];
     const char *responseStr = responseWithNewline.UTF8String;
     write(clientFd, responseStr, strlen(responseStr));
@@ -228,7 +228,7 @@
     return @"ERR Unknown parameter";
 }
 
-#pragma mark - PULL command
+#pragma mark - PULL コマンド
 
 - (void)_handlePull:(NSString *)path clientFd:(int)clientFd {
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -251,7 +251,7 @@
         return;
     }
 
-    // Send header: OK <size>\n
+    // ヘッダー送信: OK <サイズ>\n
     NSString *header = [NSString stringWithFormat:@"OK %llu\n", fileSize];
     const char *headerStr = header.UTF8String;
     if (write(clientFd, headerStr, strlen(headerStr)) < 0) {
@@ -260,7 +260,7 @@
         return;
     }
 
-    // Stream file in 64KB chunks
+    // 64KB チャンクでファイルをストリーミング
     static const NSUInteger chunkSize = 65536;
     unsigned long long sent = 0;
 
@@ -291,12 +291,12 @@
     [fh closeFile];
     close(clientFd);
 
-    // Delete file after successful transfer
+    // 転送成功後にファイルを削除
     [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
     NSLog(@"[Recorder] PULL: deleted %@", path);
 }
 
-#pragma mark - LIST command
+#pragma mark - LIST コマンド
 
 - (NSString *)_handleList {
     NSString *tmpDir = NSTemporaryDirectory();
