@@ -2,7 +2,7 @@
 
 @interface ControlServer : NSObject
 
-- (instancetype)initWithSocketPath:(NSString *)path;
+- (instancetype)initWithPort:(uint16_t)port;
 - (BOOL)start;
 - (void)stop;
 

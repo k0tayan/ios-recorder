@@ -1,12 +1,12 @@
 #import "ControlServer.h"
 #import "RecorderCore.h"
 #import <sys/socket.h>
-#import <sys/un.h>
-#import <sys/stat.h>
+#import <netinet/in.h>
+#import <arpa/inet.h>
 #import <unistd.h>
 
 @interface ControlServer ()
-@property (nonatomic) NSString *socketPath;
+@property (nonatomic) uint16_t port;
 @property (nonatomic) int serverFd;
 @property (nonatomic) BOOL running;
 @property (nonatomic) dispatch_queue_t serverQueue;
@@ -14,10 +14,10 @@
 
 @implementation ControlServer
 
-- (instancetype)initWithSocketPath:(NSString *)path {
+- (instancetype)initWithPort:(uint16_t)port {
     self = [super init];
     if (self) {
-        _socketPath = [path copy];
+        _port = port;
         _serverFd = -1;
         _running = NO;
         _serverQueue = dispatch_queue_create("com.local.iosrecorder.controlserver", DISPATCH_QUEUE_SERIAL);
@@ -26,24 +26,29 @@
 }
 
 - (BOOL)start {
-    // Remove existing socket file
-    unlink(self.socketPath.UTF8String);
+    // Ignore SIGPIPE to prevent crash when client disconnects during write
+    signal(SIGPIPE, SIG_IGN);
 
     // Create socket
-    self.serverFd = socket(AF_UNIX, SOCK_STREAM, 0);
+    self.serverFd = socket(AF_INET, SOCK_STREAM, 0);
     if (self.serverFd < 0) {
         NSLog(@"[Recorder] Failed to create socket: %s", strerror(errno));
         return NO;
     }
 
+    // Allow port reuse (avoid "address already in use" after app restart)
+    int reuse = 1;
+    setsockopt(self.serverFd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
     // Bind
-    struct sockaddr_un addr;
+    struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, self.socketPath.UTF8String, sizeof(addr.sun_path) - 1);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(self.port);
 
     if (bind(self.serverFd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        NSLog(@"[Recorder] Failed to bind socket: %s", strerror(errno));
+        NSLog(@"[Recorder] Failed to bind socket on port %u: %s", self.port, strerror(errno));
         close(self.serverFd);
         self.serverFd = -1;
         return NO;
@@ -51,17 +56,14 @@
 
     // Listen
     if (listen(self.serverFd, 5) < 0) {
-        NSLog(@"[Recorder] Failed to listen on socket: %s", strerror(errno));
+        NSLog(@"[Recorder] Failed to listen on port %u: %s", self.port, strerror(errno));
         close(self.serverFd);
         self.serverFd = -1;
         return NO;
     }
 
-    // Set permissions so any process can connect
-    chmod(self.socketPath.UTF8String, 0777);
-
     self.running = YES;
-    NSLog(@"[Recorder] ControlServer listening on %@", self.socketPath);
+    NSLog(@"[Recorder] ControlServer listening on port %u", self.port);
 
     // Accept loop in background
     dispatch_async(self.serverQueue, ^{
@@ -73,7 +75,7 @@
 
 - (void)_acceptLoop {
     while (self.running) {
-        struct sockaddr_un clientAddr;
+        struct sockaddr_in clientAddr;
         socklen_t clientLen = sizeof(clientAddr);
 
         int clientFd = accept(self.serverFd, (struct sockaddr *)&clientAddr, &clientLen);
@@ -109,6 +111,25 @@
 
     NSString *command = [NSString stringWithUTF8String:buffer];
     NSLog(@"[Recorder] Received command: %@", command);
+
+    NSString *upperCommand = [command uppercaseString];
+
+    // PULL command: binary file transfer (handled separately)
+    if ([upperCommand hasPrefix:@"PULL "]) {
+        NSString *path = [command substringFromIndex:5];
+        [self _handlePull:path clientFd:clientFd];
+        return;
+    }
+
+    // LIST command: enumerate recordings
+    if ([upperCommand isEqualToString:@"LIST"]) {
+        NSString *response = [self _handleList];
+        NSString *responseWithNewline = [response stringByAppendingString:@"\n"];
+        const char *responseStr = responseWithNewline.UTF8String;
+        write(clientFd, responseStr, strlen(responseStr));
+        close(clientFd);
+        return;
+    }
 
     NSString *response = [self _processCommand:command];
 
@@ -207,13 +228,101 @@
     return @"ERR Unknown parameter";
 }
 
+#pragma mark - PULL command
+
+- (void)_handlePull:(NSString *)path clientFd:(int)clientFd {
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    if (![fm fileExistsAtPath:path]) {
+        NSString *err = @"ERR File not found\n";
+        write(clientFd, err.UTF8String, strlen(err.UTF8String));
+        close(clientFd);
+        return;
+    }
+
+    NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+    unsigned long long fileSize = [attrs fileSize];
+
+    NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:path];
+    if (!fh) {
+        NSString *err = @"ERR Cannot open file\n";
+        write(clientFd, err.UTF8String, strlen(err.UTF8String));
+        close(clientFd);
+        return;
+    }
+
+    // Send header: OK <size>\n
+    NSString *header = [NSString stringWithFormat:@"OK %llu\n", fileSize];
+    const char *headerStr = header.UTF8String;
+    if (write(clientFd, headerStr, strlen(headerStr)) < 0) {
+        [fh closeFile];
+        close(clientFd);
+        return;
+    }
+
+    // Stream file in 64KB chunks
+    static const NSUInteger chunkSize = 65536;
+    unsigned long long sent = 0;
+
+    while (sent < fileSize) {
+        @autoreleasepool {
+            NSData *chunk = [fh readDataOfLength:chunkSize];
+            if (chunk.length == 0) break;
+
+            const uint8_t *bytes = chunk.bytes;
+            NSUInteger remaining = chunk.length;
+
+            while (remaining > 0) {
+                ssize_t written = write(clientFd, bytes, remaining);
+                if (written <= 0) {
+                    NSLog(@"[Recorder] PULL: write error at %llu/%llu", sent, fileSize);
+                    [fh closeFile];
+                    close(clientFd);
+                    return;
+                }
+                bytes += written;
+                remaining -= written;
+                sent += written;
+            }
+        }
+    }
+
+    NSLog(@"[Recorder] PULL: sent %llu bytes for %@", sent, path);
+    [fh closeFile];
+    close(clientFd);
+}
+
+#pragma mark - LIST command
+
+- (NSString *)_handleList {
+    NSArray *docPaths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *recordingsDir = [docPaths.firstObject stringByAppendingPathComponent:@"Recordings"];
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *files = [fm contentsOfDirectoryAtPath:recordingsDir error:nil];
+
+    if (!files || files.count == 0) {
+        return @"OK";
+    }
+
+    NSMutableArray *entries = [NSMutableArray array];
+    for (NSString *file in files) {
+        if (![file hasSuffix:@".mp4"]) continue;
+        NSString *fullPath = [recordingsDir stringByAppendingPathComponent:file];
+        NSDictionary *attrs = [fm attributesOfItemAtPath:fullPath error:nil];
+        unsigned long long size = [attrs fileSize];
+        [entries addObject:[NSString stringWithFormat:@"%@:%llu", file, size]];
+    }
+
+    return [NSString stringWithFormat:@"OK %@", [entries componentsJoinedByString:@" "]];
+}
+
 - (void)stop {
     self.running = NO;
     if (self.serverFd >= 0) {
         close(self.serverFd);
         self.serverFd = -1;
     }
-    unlink(self.socketPath.UTF8String);
     NSLog(@"[Recorder] ControlServer stopped");
 }
 

@@ -7,7 +7,8 @@
 
 - Jailbreak 済み iOS 15.0+ (rootless, arm64)
 - [Theos](https://theos.dev) ビルド環境
-- デバイスへの SSH 接続 (`ssh ipad`)
+- デバイスへの SSH 接続 (`ssh ipad`) ※ビルド・インストール時のみ
+- PC とデバイスが同一ネットワーク上にあること (TCP 直接接続)
 - PC 側に Python 3 (操作スクリプト用)
 
 ## ビルド・インストール
@@ -33,8 +34,8 @@ Bundle ID を変更すれば任意のアプリに適用可能。変更後は再�
 
 ## 使い方
 
-対象アプリを起動すると tweak が自動ロードされ、ソケットサーバーが待機状態になる。
-PC からコントロールスクリプトで操作する。
+対象アプリを起動すると tweak が自動ロードされ、TCP ポート 8190 でコマンドサーバーが待機状態になる。
+PC からコントロールスクリプトで操作する (SSH 不要、TCP 直接接続)。
 
 ### コントロールスクリプト
 
@@ -43,6 +44,7 @@ python3 scripts/recorder_client.py status              # 状態確認
 python3 scripts/recorder_client.py start               # 録画開始
 python3 scripts/recorder_client.py stop                # 録画停止 & ファイル転送
 python3 scripts/recorder_client.py stop --no-pull      # 停止のみ (転送しない)
+python3 scripts/recorder_client.py list                # 録画一覧
 python3 scripts/recorder_client.py set fps=30          # FPS 変更
 python3 scripts/recorder_client.py set bitrate=5000000 # ビットレート変更
 python3 scripts/recorder_client.py set resolution=1920x1440  # 解像度上限変更
@@ -50,8 +52,7 @@ python3 scripts/recorder_client.py cleanup             # tmp ファイル掃除
 ```
 
 `-o DIR` で出力先ディレクトリを指定可能。デフォルトは `recordings/`。
-
-スクリプトは SSH ソケットフォワーディングでアプリサンドボックス内の UNIX ソケットに接続する。
+`--host IP` / `--port PORT` でデバイスの接続先を変更可能。
 
 ### デフォルト設定
 
@@ -75,10 +76,10 @@ src/
   AudioEncoder       AAC エンコード (AudioToolbox / AudioConverter)
   MP4Muxer           MP4 多重化 (AVAssetWriter, passthrough)
   RecorderCore       全体の制御 (開始/停止、各コンポーネントの接続)
-  ControlServer      UNIX ソケットコマンドサーバー
+  ControlServer      TCP コマンドサーバー (ポート 8190)
 
 scripts/
-  recorder_client.py PC 側コントロールクライアント (SSH フォワーディング経由)
+  recorder_client.py PC 側コントロールクライアント (TCP 直接接続)
 ```
 
 ## 補足

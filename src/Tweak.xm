@@ -43,16 +43,15 @@ static ControlServer *controlServer = nil;
             NSLog(@"[Recorder] WARNING: AudioCapture hook installation failed");
         }
 
-        // Start ControlServer (use app sandbox tmp for sandbox compatibility)
-        NSString *sockPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"rec.sock"];
-        controlServer = [[ControlServer alloc] initWithSocketPath:sockPath];
+        // Start ControlServer on TCP port
+        controlServer = [[ControlServer alloc] initWithPort:8190];
         if ([controlServer start]) {
-            NSLog(@"[Recorder] ControlServer started on %@", sockPath);
+            NSLog(@"[Recorder] ControlServer started on port 8190");
         } else {
             NSLog(@"[Recorder] WARNING: ControlServer failed to start");
         }
 
-        NSLog(@"[Recorder] Initialization complete. Send commands to %@", sockPath);
-        NSLog(@"[Recorder] Commands: START, STOP, STATUS, SET fps=N, SET bitrate=N, SET resolution=WxH");
+        NSLog(@"[Recorder] Initialization complete. Connect to port 8190");
+        NSLog(@"[Recorder] Commands: START, STOP, STATUS, LIST, PULL, SET fps=N, SET bitrate=N, SET resolution=WxH");
     }
 }
