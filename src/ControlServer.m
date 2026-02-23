@@ -131,19 +131,13 @@
     // LIST コマンド: 録画ファイル一覧
     if ([upperCommand isEqualToString:@"LIST"]) {
         NSString *response = [self _handleList];
-        NSString *responseWithNewline = [response stringByAppendingString:@"\n"];
-        const char *responseStr = responseWithNewline.UTF8String;
-        write(clientFd, responseStr, strlen(responseStr));
+        [self _writeResponse:response toClientFd:clientFd];
         close(clientFd);
         return;
     }
 
     NSString *response = [self _processCommand:command];
-
-    // レスポンス送信
-    NSString *responseWithNewline = [response stringByAppendingString:@"\n"];
-    const char *responseStr = responseWithNewline.UTF8String;
-    write(clientFd, responseStr, strlen(responseStr));
+    [self _writeResponse:response toClientFd:clientFd];
 
     close(clientFd);
 }
@@ -174,8 +168,14 @@
             }
             dispatch_semaphore_signal(semaphore);
         }];
-        dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
-        return result ?: @"ERR Timeout";
+        long timedOut = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
+        if (timedOut != 0) {
+            // タイムアウト: 録画状態を強制リセットして半端なリソースをリークさせない
+            NSLog(@"[Recorder] STOP timed out, forcing recording state reset");
+            [recorder forceResetRecordingState];
+            return @"ERR Timeout (recording state reset)";
+        }
+        return result ?: @"ERR Unknown";
     }
 
     if ([upperCommand isEqualToString:@"STATUS"]) {
@@ -233,6 +233,18 @@
     }
 
     return @"ERR Unknown parameter";
+}
+
+- (void)_writeResponse:(NSString *)response toClientFd:(int)clientFd {
+    NSString *responseWithNewline = [response stringByAppendingString:@"\n"];
+    const char *bytes = responseWithNewline.UTF8String;
+    size_t remaining = strlen(bytes);
+    while (remaining > 0) {
+        ssize_t written = write(clientFd, bytes, remaining);
+        if (written <= 0) break;
+        bytes += written;
+        remaining -= written;
+    }
 }
 
 #pragma mark - PULL コマンド

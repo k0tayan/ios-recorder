@@ -33,6 +33,10 @@ DEFINE_RECLOG(aenclog, "iosrecorder_aenc.log")
 @property (nonatomic) uint8_t *aacOutputBuffer;
 @property (nonatomic) UInt32 aacOutputBufferSize;
 
+// 非インターリーブ→インターリーブ変換用一時バッファ (毎回 malloc を避ける)
+@property (nonatomic) uint8_t *interleavedTempBuffer;
+@property (nonatomic) UInt32 interleavedTempBufferSize;
+
 // 音声フォーマット記述
 @property (nonatomic) AudioStreamBasicDescription inputFormat;
 @property (nonatomic) AudioStreamBasicDescription outputFormat;
@@ -203,6 +207,10 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
     self.aacOutputBufferSize = 1024 * self.channels * 2;
     free(self.aacOutputBuffer);
     self.aacOutputBuffer = (uint8_t *)malloc(self.aacOutputBufferSize);
+
+    free(self.interleavedTempBuffer);
+    self.interleavedTempBuffer = NULL;
+    self.interleavedTempBufferSize = 0;
 }
 
 - (BOOL)start {
@@ -299,10 +307,14 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
         UInt32 bytesToWrite = numFrames * bytesPerFrame;
         [self _writeToRingBuffer:bufferList->mBuffers[0].mData length:bytesToWrite];
     } else {
-        // 非インターリーブ: 一時バッファにインターリーブしてから一括書き込み
-        // (サンプルごとの _writeToRingBuffer 呼び出しを避け、境界チェックのオーバーヘッドを削減)
+        // 非インターリーブ: 事前確保の一時バッファにインターリーブしてから一括書き込み
         UInt32 totalBytes = numFrames * bytesPerFrame;
-        Float32 *interleaved = (Float32 *)malloc(totalBytes);
+        if (totalBytes > self.interleavedTempBufferSize) {
+            free(self.interleavedTempBuffer);
+            self.interleavedTempBufferSize = totalBytes;
+            self.interleavedTempBuffer = (uint8_t *)malloc(totalBytes);
+        }
+        Float32 *interleaved = (Float32 *)self.interleavedTempBuffer;
         UInt32 channels = MIN(bufferList->mNumberBuffers, self.channels);
         for (UInt32 frame = 0; frame < numFrames; frame++) {
             for (UInt32 ch = 0; ch < channels; ch++) {
@@ -311,7 +323,6 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
             }
         }
         [self _writeToRingBuffer:interleaved length:totalBytes];
-        free(interleaved);
     }
 }
 
@@ -472,6 +483,7 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
     free(_ringBuffer);
     free(_encoderInputBuffer);
     free(_aacOutputBuffer);
+    free(_interleavedTempBuffer);
 }
 
 @end

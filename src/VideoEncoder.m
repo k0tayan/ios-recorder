@@ -18,8 +18,10 @@ DEFINE_RECLOG(vreclog, "iosrecorder_video.log")
 @property (nonatomic, readwrite) BOOL isRunning;
 @property (nonatomic) dispatch_queue_t encoderQueue;
 @property (nonatomic) dispatch_semaphore_t encoderSemaphore;
-@property (nonatomic) int64_t encodeCount;
 @end
+
+// レンダースレッドからインクリメント、encoderQueue から読み取りのためアトミック
+static _Atomic int64_t sEncodeCount;
 
 // VT の内部スレッドからインクリメントされるためアトミックが必要
 static _Atomic int64_t sOutputCount;
@@ -94,9 +96,16 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
     }
 
     // セッションプロパティ設定
-    VTSessionSetProperty(self.session, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
-    VTSessionSetProperty(self.session, kVTCompressionPropertyKey_ProfileLevel,
+    OSStatus propStatus;
+    propStatus = VTSessionSetProperty(self.session, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
+    if (propStatus != noErr) {
+        NSLog(@"[Recorder] WARNING: Failed to set RealTime property: %d (encoding latency may increase)", (int)propStatus);
+    }
+    propStatus = VTSessionSetProperty(self.session, kVTCompressionPropertyKey_ProfileLevel,
                          kVTProfileLevel_HEVC_Main_AutoLevel);
+    if (propStatus != noErr) {
+        NSLog(@"[Recorder] WARNING: Failed to set ProfileLevel: %d", (int)propStatus);
+    }
 
     int avgBitrate = self.bitrate;
     CFNumberRef bitrateRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &avgBitrate);
@@ -143,7 +152,7 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
     }
 
     self.isRunning = YES;
-    self.encodeCount = 0;
+    atomic_store_explicit(&sEncodeCount, 0, memory_order_relaxed);
     atomic_store_explicit(&sOutputCount, 0, memory_order_relaxed);
     vreclog("START %dx%d @%dfps %dbps", self.width, self.height, self.fps, self.bitrate);
     NSLog(@"[Recorder] VideoEncoder started: %dx%d @ %dfps, %dbps",
@@ -170,7 +179,7 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
     // VT の出力コールバックで CFRelease され、drawable が Metal に返却される。
     void *frameRefCon = surfaceOwner ? (__bridge_retained void *)surfaceOwner : NULL;
     CMTime frameDuration = CMTimeMake(1, self.fps);
-    int64_t frameNum = ++self.encodeCount;
+    int64_t frameNum = atomic_fetch_add_explicit(&sEncodeCount, 1, memory_order_relaxed) + 1;
 
     dispatch_async(self.encoderQueue, ^{
         if (self.session) {
@@ -210,10 +219,11 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
             CFRelease(self.session);
             self.session = NULL;
         }
+        int64_t submitCount = atomic_load_explicit(&sEncodeCount, memory_order_relaxed);
         int64_t outCount = atomic_load_explicit(&sOutputCount, memory_order_relaxed);
-        vreclog("STOP submitted=%lld encoded=%lld", (long long)self.encodeCount, (long long)outCount);
+        vreclog("STOP submitted=%lld encoded=%lld", (long long)submitCount, (long long)outCount);
         NSLog(@"[Recorder] VideoEncoder stopped (submitted=%lld encoded=%lld)",
-              (long long)self.encodeCount, (long long)outCount);
+              (long long)submitCount, (long long)outCount);
         if (completion) {
             dispatch_async(dispatch_get_main_queue(), completion);
         }

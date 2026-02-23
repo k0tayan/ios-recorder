@@ -14,6 +14,7 @@
 + (instancetype)shared;
 - (void)startRecording;
 - (void)stopRecordingWithCompletion:(void (^)(NSString *outputPath))completion;
+- (void)forceResetRecordingState;
 - (NSDictionary *)cleanupTempFiles;
 
 @end

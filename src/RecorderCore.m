@@ -11,7 +11,6 @@
 @property (nonatomic) MP4Muxer *muxer;
 @property (nonatomic) CMTime recordingStartTime;
 @property (nonatomic) NSString *currentOutputPath;
-@property (nonatomic) int64_t videoFrameNumber;
 @property (nonatomic) id backgroundObserver;
 @end
 
@@ -33,7 +32,7 @@
         _targetFPS = 120;
         _videoBitrate = 16000000;
         _audioBitrate = 128000;
-        _maxCaptureSize = CGSizeMake(2060, 1440);
+        _maxCaptureSize = CGSizeMake(2560, 1440);
         // バックグラウンド遷移を監視 (retain cycle 回避のため __weak を使用)
         __weak typeof(self) weakSelf = self;
         _backgroundObserver = [[NSNotificationCenter defaultCenter]
@@ -83,7 +82,7 @@
         float scale = fminf(scaleW, scaleH);
         width = (int)(width * scale);
         height = (int)(height * scale);
-        // H.264 用に偶数を保証
+        // HEVC 用に偶数を保証
         width = width & ~1;
         height = height & ~1;
     }
@@ -161,7 +160,6 @@
     [audioCapture setRecordingStartTime:self.recordingStartTime];
     audioCapture.capturing = YES;
 
-    self.videoFrameNumber = 0;
     self.isRecording = YES;
     NSLog(@"[Recorder] Recording started: %dx%d → %@",
           width, height, self.currentOutputPath);
@@ -187,11 +185,15 @@
 
     self.isRecording = NO;
 
-    // エンコーダを停止してから muxer をファイナライズ
-    __weak typeof(self) weakSelf = self;
-    [self.videoEncoder stopWithCompletion:^{
-        [weakSelf.audioEncoder stopWithCompletion:^{
-            [weakSelf.muxer finishWithCompletion:^(NSString *outputPath) {
+    // エンコーダを停止してから muxer をファイナライズ。
+    // ローカル変数でキャプチャし、stop 完了前に startRecording が呼ばれても
+    // 新インスタンスではなく旧インスタンスを正しく停止・ファイナライズする。
+    VideoEncoder *ve = self.videoEncoder;
+    AudioEncoder *ae = self.audioEncoder;
+    MP4Muxer *mux = self.muxer;
+    [ve stopWithCompletion:^{
+        [ae stopWithCompletion:^{
+            [mux finishWithCompletion:^(NSString *outputPath) {
                 if (outputPath) {
                     NSLog(@"[Recorder] Recording saved: %@", outputPath);
                 }
@@ -199,6 +201,18 @@
             }];
         }];
     }];
+}
+
+- (void)forceResetRecordingState {
+    NSLog(@"[Recorder] Force resetting recording state");
+    [FrameCapture shared].capturing = NO;
+    [FrameCapture shared].delegate = nil;
+    [AudioCapture shared].capturing = NO;
+    [AudioCapture shared].delegate = nil;
+    self.isRecording = NO;
+    self.videoEncoder = nil;
+    self.audioEncoder = nil;
+    self.muxer = nil;
 }
 
 - (NSDictionary *)cleanupTempFiles {
@@ -264,8 +278,6 @@
                timestamp:(CMTime)timestamp
             surfaceOwner:(id)surfaceOwner {
     if (!self.isRecording) return;
-
-    self.videoFrameNumber++;
 
     [self.videoEncoder encodePixelBuffer:pixelBuffer timestamp:timestamp surfaceOwner:surfaceOwner];
 }

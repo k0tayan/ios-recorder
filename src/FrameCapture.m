@@ -12,7 +12,6 @@ typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
 @property (nonatomic) double ticksPerSecond;
 @property (nonatomic) CMTime recordingStartTime;
 @property (nonatomic) BOOL startTimeSet;
-@property (nonatomic) int64_t frameCount;
 @end
 
 @implementation FrameCapture
@@ -44,10 +43,21 @@ typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
 - (void)setRecordingStartTime:(CMTime)startTime {
     _recordingStartTime = startTime;
     _startTimeSet = YES;
-    _frameCount = 0;
 }
 
 - (void)captureDrawable:(id<CAMetalDrawable>)drawable {
+    // captureSize は録画開始前 (capturing=NO) でも常に更新する。
+    // startRecording がキャプチャサイズを読み取って VideoEncoder を初期化するため、
+    // ここで更新しないとフォールバックの maxCaptureSize (16:9) が使われ、
+    // 4:3 の iPad 画面が横に引き伸ばされる。
+    id<MTLTexture> texture = drawable.texture;
+    if (texture) {
+        CGSize newSize = CGSizeMake(texture.width, texture.height);
+        if (!CGSizeEqualToSize(newSize, _captureSize)) {
+            self.captureSize = newSize;
+        }
+    }
+
     if (!self.capturing || !self.delegate) {
         return;
     }
@@ -64,8 +74,6 @@ typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
         }
         self.lastCaptureTime = now;
 
-        // テクスチャ取得
-        id<MTLTexture> texture = drawable.texture;
         if (!texture) {
             return;
         }
@@ -81,9 +89,6 @@ typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
         if (!surface) {
             return;
         }
-
-        // キャプチャサイズ更新
-        self.captureSize = CGSizeMake(texture.width, texture.height);
 
         // IOSurface から CVPixelBuffer を生成 (ロックなし・ゼロコピー)
         CVPixelBufferRef pixelBuffer = NULL;
