@@ -18,13 +18,6 @@ SSH_HOST ?= ipad
 DEB = $(lastword $(sort $(wildcard packages/*.deb)))
 
 .PHONY: deploy remove
-
-deploy:
-	@echo "[*] Copying .deb to $(SSH_HOST)..."
-	scp $(DEB) $(SSH_HOST):/tmp/iosrecorder.deb
-	@echo "[*] Installing on $(SSH_HOST)..."
-	ssh $(SSH_HOST) "dpkg -i /tmp/iosrecorder.deb && rm /tmp/iosrecorder.deb"
-
 remove:
 	ssh $(SSH_HOST) "dpkg -r com.local.iosrecorder"
 	@echo "[*] Uninstalled. Respring to take effect."

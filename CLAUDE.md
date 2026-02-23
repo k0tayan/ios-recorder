@@ -1,10 +1,25 @@
-debug先の実機はssh ipadで接続できる。
-com.sega.pjsekaiのアプリ名は「プロセカ」
-プロセカ起動コマンド　ssh ipad "/var/jb/usr/bin/uiopen --bundleid com.sega.pjsekai" 2>&1 
-fridaがインストールされてるので動的解析可能。
+# ios_recorder — Theos Tweak
 
-● Bash(ssh ipad "find /var/mobile/Containers/Data/Application -maxdepth 3 -name '.com.sega.pjsekai*' -o -name 'ios_recorder*' 2>/dev/null" 2>&1)                                                                                                                                                                                                         
-  ⎿  /var/mobile/Containers/Data/Application/D5A71536-CF52-4E83-8887-3CCC811C67F2/tmp/ios_recorder.s
-                                                                                                                                                                                                                                                                                                                                                         
-● ソケット発見！SSHトンネル経由で接続して確認します。   
-デプロイするときにrespring不要
+## プロジェクト概要
+- Theos ベースの iOS Tweak（rootless）
+- 現状のユースケース: プロセカ（com.sega.pjsekai）のゲーム画面撮影
+
+## ビルド & デプロイ
+| コマンド | 説明 |
+|---|---|
+| `make` | ビルド |
+| `make package` | .deb パッケージ作成 |
+| `make package install` | ビルド → パッケージ → `THEOS_DEVICE_IP` へインストール |
+
+- デプロイ時に respring は不要、ただしアプリの再起動は必要
+- 実行バイナリ名は `ProductName`（プロセス kill 時は `ProductName` で grep）
+
+## デバイス接続
+- `ssh ipad` で実機に接続（IP: 192.168.1.145）
+- Frida がインストール済み → 動的解析可能
+
+## よく使うコマンド
+```bash
+# プロセカ起動
+ssh ipad "/var/jb/usr/bin/uiopen --bundleid com.sega.pjsekai" 2>&1
+```
