@@ -366,6 +366,10 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
         int64_t sampleOffset = (int64_t)self.totalFramesEncoded * 1024 - (int64_t)self.primingSamples;
         CMTime pts = CMTimeAdd(self.firstTimestamp,
             CMTimeMakeWithSeconds((double)sampleOffset / self.sampleRate, (int32_t)self.sampleRate));
+        // プライミング補償で最初の数フレームの PTS が負になりうる — AVAssetWriter が拒否するため 0 にクランプ
+        if (CMTimeCompare(pts, kCMTimeZero) < 0) {
+            pts = kCMTimeZero;
+        }
         self.totalFramesEncoded++;
 
         CMSampleBufferRef sampleBuffer = NULL;

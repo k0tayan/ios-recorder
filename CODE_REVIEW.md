@@ -52,11 +52,11 @@
 - **問題:** `addObserverForName:usingBlock:` で `self` を強参照でキャプチャしている。シングルトンなので実害はないが、`removeObserver` も呼ばれていない。
 - **修正内容:** ブロック内で `__weak`/`__strong` パターンを使用し、observer トークンをプロパティに保持。`dealloc` で `removeObserver:` を呼ぶようにした。
 
-### 6. AudioEncoder: 負の PTS の可能性
+### 6. ~~AudioEncoder: 負の PTS の可能性~~ ✅ 修正済み
 
-- **ファイル:** `AudioEncoder.m:365-367`
+- **ファイル:** `AudioEncoder.m`
 - **問題:** プライミング補償で最初の 2〜3 フレームの `sampleOffset` が負値になり、`AVAssetWriter` が負の PTS を拒否する可能性がある。
-- **対策:** 負の PTS を 0 にクランプするか、プライミングサンプル分を firstTimestamp のアンカーで吸収する。
+- **修正内容:** PTS 算出後に `CMTimeCompare(pts, kCMTimeZero) < 0` で負値を検出し、0 にクランプするようにした。
 
 ### 7. VideoEncoder: 出力コールバック内の冗長な CFRetain/CFRelease
 
