@@ -4,6 +4,5 @@
 
 - (instancetype)initWithPort:(uint16_t)port;
 - (BOOL)start;
-- (void)stop;
 
 @end

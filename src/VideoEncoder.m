@@ -1,23 +1,7 @@
 #import "VideoEncoder.h"
-#include <sys/time.h>
+#import "RecorderLog.h"
 
-// ─── File-based debug logging (shared log file with AudioCapture) ──
-static FILE *sVideoLogFile = NULL;
-
-static void vreclog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-static void vreclog(const char *fmt, ...) {
-    if (!sVideoLogFile) {
-        NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"iosrecorder_video.log"];
-        sVideoLogFile = fopen(tmp.UTF8String, "a");
-        if (sVideoLogFile) setlinebuf(sVideoLogFile);
-    }
-    if (!sVideoLogFile) return;
-    struct timeval tv; gettimeofday(&tv, NULL);
-    struct tm t; localtime_r(&tv.tv_sec, &t);
-    fprintf(sVideoLogFile, "%02d:%02d:%02d.%03d ", t.tm_hour, t.tm_min, t.tm_sec, (int)(tv.tv_usec/1000));
-    va_list ap; va_start(ap, fmt); vfprintf(sVideoLogFile, fmt, ap); va_end(ap);
-    fprintf(sVideoLogFile, "\n");
-}
+DEFINE_RECLOG(vreclog, "iosrecorder_video.log")
 
 // Max frames queued for async encoding.  Metal's drawable pool has ~3
 // surfaces; keeping the queue shallow ensures each IOSurface-backed pixel

@@ -1,23 +1,7 @@
 #import "AudioEncoder.h"
-#include <sys/time.h>
+#import "RecorderLog.h"
 
-// ─── File-based debug logging ──────────────────────────────────────
-static FILE *sAEncLogFile = NULL;
-
-static void aenclog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-static void aenclog(const char *fmt, ...) {
-    if (!sAEncLogFile) {
-        NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"iosrecorder_aenc.log"];
-        sAEncLogFile = fopen(tmp.UTF8String, "a");
-        if (sAEncLogFile) setlinebuf(sAEncLogFile);
-    }
-    if (!sAEncLogFile) return;
-    struct timeval tv; gettimeofday(&tv, NULL);
-    struct tm t; localtime_r(&tv.tv_sec, &t);
-    fprintf(sAEncLogFile, "%02d:%02d:%02d.%03d ", t.tm_hour, t.tm_min, t.tm_sec, (int)(tv.tv_usec/1000));
-    va_list ap; va_start(ap, fmt); vfprintf(sAEncLogFile, fmt, ap); va_end(ap);
-    fprintf(sAEncLogFile, "\n");
-}
+DEFINE_RECLOG(aenclog, "iosrecorder_aenc.log")
 
 @interface AudioEncoder ()
 @property (nonatomic) AudioConverterRef converter;
@@ -128,8 +112,7 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
     return self;
 }
 
-- (BOOL)start {
-    // Input format: interleaved Float32 PCM
+- (BOOL)_createConverter {
     _inputFormat = (AudioStreamBasicDescription){
         .mFormatID = kAudioFormatLinearPCM,
         .mSampleRate = self.sampleRate,
@@ -141,7 +124,6 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
         .mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
     };
 
-    // Output format: AAC
     _outputFormat = (AudioStreamBasicDescription){
         .mFormatID = kAudioFormatMPEG4AAC,
         .mSampleRate = self.sampleRate,
@@ -155,17 +137,15 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
         return NO;
     }
 
-    // Set bitrate
     UInt32 outputBitrate = self.bitrate;
     AudioConverterSetProperty(self.converter, kAudioConverterEncodeBitRate,
                                sizeof(outputBitrate), &outputBitrate);
 
-    // Get the actual output format (may have been adjusted)
     UInt32 size = sizeof(_outputFormat);
     AudioConverterGetProperty(self.converter, kAudioConverterCurrentOutputStreamDescription,
                                &size, &_outputFormat);
 
-    // Get magic cookie (AudioSpecificConfig) from the converter
+    // Get magic cookie (AudioSpecificConfig) for proper esds box
     UInt32 cookieSize = 0;
     void *cookie = NULL;
     OSStatus cookieStatus = AudioConverterGetPropertyInfo(
@@ -176,7 +156,6 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
                                    &cookieSize, cookie);
     }
 
-    // Create audio format description with magic cookie for proper esds box
     CMAudioFormatDescriptionCreate(kCFAllocatorDefault, &_outputFormat,
                                     0, NULL,
                                     cookieSize, cookie,
@@ -192,6 +171,42 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
     } else {
         self.primingSamples = 2112; // default for AAC-LC
     }
+
+    return YES;
+}
+
+- (void)_disposeConverter {
+    if (self.converter) {
+        AudioConverterDispose(self.converter);
+        self.converter = NULL;
+    }
+    if (self.audioFormatDescription) {
+        CFRelease(self.audioFormatDescription);
+        self.audioFormatDescription = NULL;
+    }
+}
+
+- (void)_reallocateBuffers {
+    UInt32 bytesPerFrame = self.channels * sizeof(Float32);
+
+    self.ringBufferSize = (UInt32)(self.sampleRate * bytesPerFrame * 2);
+    free(self.ringBuffer);
+    self.ringBuffer = (uint8_t *)calloc(1, self.ringBufferSize);
+    self.ringBufferReadPos = 0;
+    self.ringBufferWritePos = 0;
+    self.ringBufferAvailable = 0;
+
+    self.encoderInputBufferSize = 1024 * bytesPerFrame;
+    free(self.encoderInputBuffer);
+    self.encoderInputBuffer = (uint8_t *)malloc(self.encoderInputBufferSize);
+
+    self.aacOutputBufferSize = 1024 * self.channels * 2;
+    free(self.aacOutputBuffer);
+    self.aacOutputBuffer = (uint8_t *)malloc(self.aacOutputBufferSize);
+}
+
+- (BOOL)start {
+    if (![self _createConverter]) return NO;
 
     self.isRunning = YES;
     self.ptsInitialized = NO;
@@ -218,91 +233,7 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
 
         // Encode remaining data with old settings
         [self _encodeAvailableFrames];
-
-        // Dispose old converter
-        if (self.converter) {
-            AudioConverterDispose(self.converter);
-            self.converter = NULL;
-        }
-        if (self.audioFormatDescription) {
-            CFRelease(self.audioFormatDescription);
-            self.audioFormatDescription = NULL;
-        }
-
-        // Update format
-        self.sampleRate = sampleRate;
-        self.channels = channels;
-
-        // Reallocate ring buffer for new format
-        UInt32 bytesPerFrame = channels * sizeof(Float32);
-        self.ringBufferSize = (UInt32)(sampleRate * bytesPerFrame * 2);
-        free(self.ringBuffer);
-        self.ringBuffer = (uint8_t *)calloc(1, self.ringBufferSize);
-        self.ringBufferReadPos = 0;
-        self.ringBufferWritePos = 0;
-        self.ringBufferAvailable = 0;
-
-        self.encoderInputBufferSize = 1024 * bytesPerFrame;
-        free(self.encoderInputBuffer);
-        self.encoderInputBuffer = (uint8_t *)malloc(self.encoderInputBufferSize);
-
-        self.aacOutputBufferSize = 1024 * channels * 2;
-        free(self.aacOutputBuffer);
-        self.aacOutputBuffer = (uint8_t *)malloc(self.aacOutputBufferSize);
-
-        // Create new converter
-        _inputFormat = (AudioStreamBasicDescription){
-            .mFormatID = kAudioFormatLinearPCM,
-            .mSampleRate = sampleRate,
-            .mChannelsPerFrame = channels,
-            .mBitsPerChannel = 32,
-            .mBytesPerFrame = channels * sizeof(Float32),
-            .mBytesPerPacket = channels * sizeof(Float32),
-            .mFramesPerPacket = 1,
-            .mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-        };
-        _outputFormat = (AudioStreamBasicDescription){
-            .mFormatID = kAudioFormatMPEG4AAC,
-            .mSampleRate = sampleRate,
-            .mChannelsPerFrame = channels,
-            .mFramesPerPacket = 1024,
-        };
-
-        OSStatus status = AudioConverterNew(&_inputFormat, &_outputFormat, &_converter);
-        if (status != noErr) {
-            NSLog(@"[Recorder] Failed to recreate AudioConverter: %d", (int)status);
-            return;
-        }
-
-        UInt32 outputBitrate = self.bitrate;
-        AudioConverterSetProperty(self.converter, kAudioConverterEncodeBitRate,
-                                   sizeof(outputBitrate), &outputBitrate);
-
-        UInt32 size = sizeof(_outputFormat);
-        AudioConverterGetProperty(self.converter, kAudioConverterCurrentOutputStreamDescription,
-                                   &size, &_outputFormat);
-
-        UInt32 cookieSize = 0;
-        void *cookie = NULL;
-        OSStatus cookieStatus = AudioConverterGetPropertyInfo(
-            _converter, kAudioConverterCompressionMagicCookie, &cookieSize, NULL);
-        if (cookieStatus == noErr && cookieSize > 0) {
-            cookie = malloc(cookieSize);
-            AudioConverterGetProperty(_converter, kAudioConverterCompressionMagicCookie,
-                                       &cookieSize, cookie);
-        }
-        CMAudioFormatDescriptionCreate(kCFAllocatorDefault, &_outputFormat,
-                                        0, NULL, cookieSize, cookie,
-                                        NULL, &_audioFormatDescription);
-        if (cookie) free(cookie);
-
-        // Query priming for new converter
-        AudioConverterPrimeInfo newPrimeInfo = {0};
-        UInt32 newPrimeSize = sizeof(newPrimeInfo);
-        if (AudioConverterGetProperty(_converter, kAudioConverterPrimeInfo,
-                                       &newPrimeSize, &newPrimeInfo) == noErr) {
-            self.primingSamples = newPrimeInfo.leadingFrames;
-        }
+        [self _disposeConverter];
 
         // Log PTS state before reset to detect discontinuities
         if (self.ptsInitialized) {
@@ -310,6 +241,16 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
             double lastPTS = CMTimeGetSeconds(self.firstTimestamp) + (double)lastSampleOffset / self.sampleRate;
             aenclog("RECONFIG ptsReset: lastPTS=%.3f firstTimestamp=%.3f totalFrames=%lld",
                     lastPTS, CMTimeGetSeconds(self.firstTimestamp), (long long)self.totalFramesEncoded);
+        }
+
+        // Update format and reallocate buffers
+        self.sampleRate = sampleRate;
+        self.channels = channels;
+        [self _reallocateBuffers];
+
+        if (![self _createConverter]) {
+            NSLog(@"[Recorder] Failed to recreate AudioConverter");
+            return;
         }
 
         // Reset PTS tracking for new format
@@ -506,16 +447,7 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
     dispatch_async(self.encoderQueue, ^{
         // Encode any remaining samples
         [self _encodeAvailableFrames];
-
-        if (self.converter) {
-            AudioConverterDispose(self.converter);
-            self.converter = NULL;
-        }
-
-        if (self.audioFormatDescription) {
-            CFRelease(self.audioFormatDescription);
-            self.audioFormatDescription = NULL;
-        }
+        [self _disposeConverter];
 
         NSLog(@"[Recorder] AudioEncoder stopped");
         if (completion) {
@@ -525,8 +457,7 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
 }
 
 - (void)dealloc {
-    if (_converter) AudioConverterDispose(_converter);
-    if (_audioFormatDescription) CFRelease(_audioFormatDescription);
+    [self _disposeConverter];
     free(_ringBuffer);
     free(_encoderInputBuffer);
     free(_aacOutputBuffer);

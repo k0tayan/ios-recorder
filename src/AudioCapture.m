@@ -1,27 +1,11 @@
 #import "AudioCapture.h"
+#import "RecorderLog.h"
 #import <dlfcn.h>
 #import <substrate.h>
 #include <stdatomic.h>
-#include <sys/time.h>
 #include <mach/mach_time.h>
 
-// ─── File-based debug logging ────────────────────────────────────────
-static FILE *sLogFile = NULL;
-
-static void reclog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-static void reclog(const char *fmt, ...) {
-    if (!sLogFile) {
-        NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"iosrecorder_audio.log"];
-        sLogFile = fopen(tmp.UTF8String, "a");
-        if (sLogFile) setlinebuf(sLogFile);
-    }
-    if (!sLogFile) return;
-    struct timeval tv; gettimeofday(&tv, NULL);
-    struct tm t; localtime_r(&tv.tv_sec, &t);
-    fprintf(sLogFile, "%02d:%02d:%02d.%03d ", t.tm_hour, t.tm_min, t.tm_sec, (int)(tv.tv_usec/1000));
-    va_list ap; va_start(ap, fmt); vfprintf(sLogFile, fmt, ap); va_end(ap);
-    fprintf(sLogFile, "\n");
-}
+DEFINE_RECLOG(reclog, "iosrecorder_audio.log")
 
 // ─── Lock-free SPSC ring buffer (RT thread → drain thread) ─────────
 #define RING_SLOT_COUNT   256
@@ -272,11 +256,6 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
                    (void **)&orig_AudioUnitSetProperty);
     NSLog(@"[Recorder] AudioUnitSetProperty hooked successfully");
     return YES;
-}
-
-- (void)removeHook {
-    self.capturing = NO;
-    self.delegate  = nil;
 }
 
 #pragma mark - Capturing state

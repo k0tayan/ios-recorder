@@ -7,7 +7,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = iosrecorder
 iosrecorder_FILES = $(wildcard src/*.m) $(wildcard src/*.xm)
-iosrecorder_FRAMEWORKS = AVFoundation CoreMedia CoreVideo VideoToolbox AudioToolbox Photos Metal QuartzCore Foundation UIKit
+iosrecorder_FRAMEWORKS = AVFoundation CoreMedia CoreVideo VideoToolbox AudioToolbox Metal QuartzCore Foundation UIKit
 iosrecorder_PRIVATE_FRAMEWORKS = IOSurface
 iosrecorder_CFLAGS = -fobjc-arc -Isrc
 

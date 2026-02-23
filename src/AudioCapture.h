@@ -24,7 +24,6 @@
 
 + (instancetype)shared;
 - (BOOL)installHook;
-- (void)removeHook;
 - (void)setRecordingStartTime:(CMTime)startTime;
 - (void)updateAudioFormat;
 

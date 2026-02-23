@@ -319,17 +319,4 @@
     return [NSString stringWithFormat:@"OK %@", [entries componentsJoinedByString:@" "]];
 }
 
-- (void)stop {
-    self.running = NO;
-    if (self.serverFd >= 0) {
-        close(self.serverFd);
-        self.serverFd = -1;
-    }
-    NSLog(@"[Recorder] ControlServer stopped");
-}
-
-- (void)dealloc {
-    [self stop];
-}
-
 @end
