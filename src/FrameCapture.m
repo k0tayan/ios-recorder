@@ -7,7 +7,7 @@
 typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
 
 @interface FrameCapture ()
-@property (nonatomic) CGSize captureSize;
+@property (atomic) CGSize captureSize;
 @property (nonatomic) uint64_t lastCaptureTime;
 @property (nonatomic) double ticksPerSecond;
 @property (nonatomic) CMTime recordingStartTime;
@@ -83,7 +83,7 @@ typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
         }
 
         // キャプチャサイズ更新
-        _captureSize = CGSizeMake(texture.width, texture.height);
+        self.captureSize = CGSizeMake(texture.width, texture.height);
 
         // IOSurface から CVPixelBuffer を生成 (ロックなし・ゼロコピー)
         CVPixelBufferRef pixelBuffer = NULL;

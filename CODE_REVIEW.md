@@ -80,11 +80,11 @@
 
 ## Low
 
-### 10. FrameCapture: captureSize の構造体アトミシティ
+### 10. ~~FrameCapture: captureSize の構造体アトミシティ~~ ✅ 修正済み
 
-- **ファイル:** `FrameCapture.m:86`
+- **ファイル:** `FrameCapture.h`, `FrameCapture.m`
 - **問題:** `CGSize` は 2 つの `CGFloat` で構成される構造体で、理論上は部分読み取りの可能性がある。arm64 専用なので実質問題ないが正式には保護すべき。
-- **対策:** `@synchronized` や atomic プロパティで保護する。
+- **修正内容:** `captureSize` プロパティを `nonatomic` から `atomic` に変更し、書き込みも ivar 直接アクセスから setter 経由に変更。ObjC の `atomic` プロパティは getter/setter をスピンロックで保護する。
 
 ### 11. RecorderCore: startRecording の部分的失敗時のクリーンアップ
 
