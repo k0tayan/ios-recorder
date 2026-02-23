@@ -12,6 +12,7 @@
 @property (nonatomic) CMTime recordingStartTime;
 @property (nonatomic) NSString *currentOutputPath;
 @property (nonatomic) int64_t videoFrameNumber;
+@property (nonatomic) id backgroundObserver;
 @end
 
 @implementation RecorderCore
@@ -33,13 +34,16 @@
         _videoBitrate = 16000000;
         _audioBitrate = 128000;
         _maxCaptureSize = CGSizeMake(2060, 1440);
-        // バックグラウンド遷移を監視
-        [[NSNotificationCenter defaultCenter]
+        // バックグラウンド遷移を監視 (retain cycle 回避のため __weak を使用)
+        __weak typeof(self) weakSelf = self;
+        _backgroundObserver = [[NSNotificationCenter defaultCenter]
             addObserverForName:UIApplicationDidEnterBackgroundNotification
                         object:nil queue:nil
                     usingBlock:^(NSNotification *note) {
-            if (self.isRecording) {
-                [self stopRecordingWithCompletion:^(NSString *path) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            if (strongSelf.isRecording) {
+                [strongSelf stopRecordingWithCompletion:^(NSString *path) {
                     NSLog(@"[Recorder] Auto-stopped on background: %@", path);
                 }];
             }
@@ -274,6 +278,12 @@
     if (!self.isRecording) return;
     NSLog(@"[Recorder] Audio format change detected during recording, reconfiguring encoder");
     [self.audioEncoder reconfigureWithSampleRate:sampleRate channels:channels];
+}
+
+- (void)dealloc {
+    if (_backgroundObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:_backgroundObserver];
+    }
 }
 
 @end

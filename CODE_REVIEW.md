@@ -46,11 +46,11 @@
 
 ## Medium
 
-### 5. RecorderCore: バックグラウンド通知の retain cycle
+### 5. ~~RecorderCore: バックグラウンド通知の retain cycle~~ ✅ 修正済み
 
-- **ファイル:** `RecorderCore.m:40-46`
+- **ファイル:** `RecorderCore.m`
 - **問題:** `addObserverForName:usingBlock:` で `self` を強参照でキャプチャしている。シングルトンなので実害はないが、`removeObserver` も呼ばれていない。
-- **対策:** `__weak` を使い、`dealloc` で `removeObserver` する。
+- **修正内容:** ブロック内で `__weak`/`__strong` パターンを使用し、observer トークンをプロパティに保持。`dealloc` で `removeObserver:` を呼ぶようにした。
 
 ### 6. AudioEncoder: 負の PTS の可能性
 
