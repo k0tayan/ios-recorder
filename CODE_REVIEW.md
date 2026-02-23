@@ -86,11 +86,11 @@
 - **問題:** `CGSize` は 2 つの `CGFloat` で構成される構造体で、理論上は部分読み取りの可能性がある。arm64 専用なので実質問題ないが正式には保護すべき。
 - **修正内容:** `captureSize` プロパティを `nonatomic` から `atomic` に変更し、書き込みも ivar 直接アクセスから setter 経由に変更。ObjC の `atomic` プロパティは getter/setter をスピンロックで保護する。
 
-### 11. RecorderCore: startRecording の部分的失敗時のクリーンアップ
+### 11. ~~RecorderCore: startRecording の部分的失敗時のクリーンアップ~~ ✅ 修正済み
 
-- **ファイル:** `RecorderCore.m:116-135`
+- **ファイル:** `RecorderCore.m`
 - **問題:** エンコーダの start が失敗した場合、前のインスタンスが中途半端な状態で残る。ARC で基本 OK だが明示的なクリーンアップが望ましい。
-- **対策:** 失敗時に各プロパティを nil に戻す。
+- **修正内容:** VideoEncoder / AudioEncoder / MP4Muxer それぞれの `start` 失敗時に、既に開始済みのコンポーネントを stop し、全プロパティを nil に戻すようにした。
 
 ### 12. ControlServer: PULL コマンドのパストラバーサル
 

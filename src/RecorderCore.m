@@ -116,14 +116,20 @@
         [weakMuxer appendAudioSample:sampleBuffer];
     };
 
-    // 全コンポーネント開始
+    // 全コンポーネント開始 (部分失敗時は中途半端な状態を残さないよう nil クリーンアップ)
     if (![self.videoEncoder start]) {
         NSLog(@"[Recorder] Failed to start VideoEncoder");
+        self.videoEncoder = nil;
+        self.audioEncoder = nil;
+        self.muxer = nil;
         return;
     }
     if (![self.audioEncoder start]) {
         NSLog(@"[Recorder] Failed to start AudioEncoder");
         [self.videoEncoder stopWithCompletion:nil];
+        self.videoEncoder = nil;
+        self.audioEncoder = nil;
+        self.muxer = nil;
         return;
     }
 
@@ -135,6 +141,9 @@
         NSLog(@"[Recorder] Failed to start MP4Muxer");
         [self.videoEncoder stopWithCompletion:nil];
         [self.audioEncoder stopWithCompletion:nil];
+        self.videoEncoder = nil;
+        self.audioEncoder = nil;
+        self.muxer = nil;
         return;
     }
 
