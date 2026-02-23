@@ -13,11 +13,13 @@
 ## ビルド・インストール
 
 ```bash
-make package           # .deb をビルド
-make deploy            # SSH 経由でコピー＆インストール
-make deploy-respring   # インストール＋リスプリング
-make remove            # アンインストール
+make                  # ビルド
+make package          # .deb をビルド
+make package install  # ビルド → パッケージ → デバイスへインストール
+make remove           # アンインストール
 ```
+
+インストール後 respring は不要だが、対象アプリの再起動が必要。
 
 ## 対象アプリの設定
 
@@ -44,7 +46,7 @@ python3 scripts/recorder_client.py stop --no-pull      # 停止のみ (転送し
 python3 scripts/recorder_client.py set fps=30          # FPS 変更
 python3 scripts/recorder_client.py set bitrate=5000000 # ビットレート変更
 python3 scripts/recorder_client.py set resolution=1920x1440  # 解像度上限変更
-python3 scripts/recorder_client.py cleanup               # tmp ファイル掃除
+python3 scripts/recorder_client.py cleanup             # tmp ファイル掃除
 ```
 
 `-o DIR` で出力先ディレクトリを指定可能。デフォルトは `recordings/`。
@@ -55,28 +57,32 @@ python3 scripts/recorder_client.py cleanup               # tmp ファイル掃�
 
 | 項目 | デフォルト値 |
 |------|-------------|
-| 解像度上限 | 2048x1536 (4:3) |
+| 解像度上限 | 2060x1440 |
 | FPS | 120 |
-| 映像ビットレート | 24 Mbps |
-| 音声ビットレート | 256 kbps |
-| コーデック | H.264 / AAC |
+| 映像ビットレート | 16 Mbps |
+| 音声ビットレート | 128 kbps |
+| コーデック | H.265 (HEVC) / AAC |
 | コンテナ | MP4 |
 
 ## 構成
 
 ```
-Tweak.xm          フックのエントリポイント (CAMetalLayer)
-FrameCapture       Metal フレームキャプチャ (IOSurface → CVPixelBuffer)
-AudioCapture       音声キャプチャ (AudioUnit レンダーコールバックフック)
-VideoEncoder       H.264 エンコード (VideoToolbox)
-AudioEncoder       AAC エンコード (AudioToolbox)
-MP4Muxer           MP4 多重化 (AVAssetWriter)
-RecorderCore       全体の制御 (開始/停止、各コンポーネントの接続)
-ControlServer      UNIX ソケットコマンドサーバー
+src/
+  Tweak.xm          フックのエントリポイント (CAMetalLayer, AudioUnit)
+  FrameCapture       Metal フレームキャプチャ (IOSurface → CVPixelBuffer, zero-copy)
+  AudioCapture       音声キャプチャ (AudioUnit レンダーコールバックフック, lock-free SPSC ring buffer)
+  VideoEncoder       H.265 エンコード (VideoToolbox)
+  AudioEncoder       AAC エンコード (AudioToolbox / AudioConverter)
+  MP4Muxer           MP4 多重化 (AVAssetWriter, passthrough)
+  RecorderCore       全体の制御 (開始/停止、各コンポーネントの接続)
+  ControlServer      UNIX ソケットコマンドサーバー
+
+scripts/
+  recorder_client.py PC 側コントロールクライアント (SSH フォワーディング経由)
 ```
 
 ## 補足
 
 - アプリがバックグラウンドに遷移すると録画は自動停止される
 - 録画ファイルはアプリのサンドボックス tmp に保存後、Documents にコピーされ tmp 側は自動削除される
-- `cleanup` コマンドで `CFNetworkDownload_*.tmp`、空の `NSIRD_*` ディレクトリ、0 バイトの失敗録画、Documents にコピー済みの録画を一括削除できる
+- `cleanup` コマンドで不要な一時ファイルを一括削除できる
