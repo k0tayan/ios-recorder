@@ -64,11 +64,11 @@
 - **問題:** `sampleBuffer` を retain→callback→release しているが、callback 側（`MP4Muxer.appendVideoSample:`）でも `CFRetain` しているので冗長。
 - **修正内容:** VT 出力コールバック内の `CFRetain`/`CFRelease` を削除。`sampleBuffer` はコールバック中有効であり、`MP4Muxer` 側が自身で `CFRetain` する設計のため不要。
 
-### 8. ControlServer: TCP read が部分的に返る可能性
+### 8. ~~ControlServer: TCP read が部分的に返る可能性~~ ✅ 修正済み
 
-- **ファイル:** `ControlServer.m:98`
+- **ファイル:** `ControlServer.m`
 - **問題:** TCP では `read` が要求バイト数より少なく返ることがある。コマンドが途中で切れる可能性。
-- **対策:** デリミタ（`\n`）まで読むループを実装する。
+- **修正内容:** `_handleClient:` の `read` をデリミタ (`\n`) が到着するか、バッファが満杯になるか、接続が切れるまでループするように変更。
 
 ### 9. AudioEncoder: 非インターリーブ変換のパフォーマンス
 

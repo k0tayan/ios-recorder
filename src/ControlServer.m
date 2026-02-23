@@ -94,14 +94,21 @@
 }
 
 - (void)_handleClient:(int)clientFd {
+    // TCP は部分読み取りを返す可能性があるため、デリミタ (\n) まで読むループ
     char buffer[1024];
-    ssize_t bytesRead = read(clientFd, buffer, sizeof(buffer) - 1);
-    if (bytesRead <= 0) {
+    ssize_t total = 0;
+    while (total < (ssize_t)(sizeof(buffer) - 1)) {
+        ssize_t n = read(clientFd, buffer + total, sizeof(buffer) - 1 - total);
+        if (n <= 0) break;
+        total += n;
+        if (memchr(buffer, '\n', total)) break;  // デリミタ到着
+    }
+    if (total <= 0) {
         close(clientFd);
         return;
     }
 
-    buffer[bytesRead] = '\0';
+    buffer[total] = '\0';
 
     // 末尾の改行を除去
     char *newline = strchr(buffer, '\n');
