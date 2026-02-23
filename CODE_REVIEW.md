@@ -11,14 +11,14 @@
 
 ## Critical
 
-### 1. IOSurface の寿命とエンコードのレース
+### 1. ~~IOSurface の寿命とエンコードのレース~~ ✅ 修正済み
 
-- **ファイル:** `FrameCapture.m:89-112`, `VideoEncoder.m:160`
+- **ファイル:** `FrameCapture.m`, `FrameCapture.h`, `VideoEncoder.m`, `VideoEncoder.h`, `RecorderCore.m`
 - **問題:** `CVPixelBufferCreateWithIOSurface` はゼロコピーなので、CVPixelBuffer は IOSurface のバッキングメモリを共有している。`captureDrawable:` の末尾で `CVPixelBufferRelease` した後、Metal が同じ IOSurface を次フレームの描画に再利用すると、VideoEncoder が非同期でエンコード中のピクセルデータが上書きされる可能性がある。`VideoEncoder.m:160` で `CVPixelBufferRetain` しているが、これは IOSurface のバッキングメモリの排他制御を保証しない。`ENCODER_QUEUE_DEPTH=2` で緩和しているものの、Metal の drawable プールサイズ（通常3）と競合する余地が残る。
-- **対策案:**
-  - `CVPixelBufferPool` を使い、エンコード前にピクセルデータをコピーする（レイテンシ vs 安全性のトレードオフ）
-  - または `IOSurfaceLock` / `IOSurfaceUnlock` で排他アクセスを確保する
-  - 現状の `ENCODER_QUEUE_DEPTH=2` は実用上多くのケースで機能しているが、120fps + 高負荷時に破綻するリスクがある
+- **修正内容:** CAMetalDrawable を `surfaceOwner` としてデリゲート経由で VideoEncoder に渡し、`VTCompressionSessionEncodeFrame` の `sourceFrameRefCon` に `__bridge_retained` で保持させる。VT の出力コールバックで `CFRelease` することで、エンコード完了まで Metal が IOSurface を再利用できないようにした。ゼロコピーを維持したまま、追加 CPU 負荷ほぼゼロで安全性を確保。
+- **不採用案:**
+  - `CVPixelBufferPool` + memcpy: 1920x1080 BGRA で ~8MB/frame のコピーがレンダースレッドで発生し、ゲーム動作への負荷が大きいため不採用
+  - `IOSurfaceLock` / `IOSurfaceUnlock`: CPU レベルのロックであり、GPU (Metal) の書き込みを防げないため不採用
 
 ---
 

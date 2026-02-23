@@ -7,9 +7,12 @@
 @class FrameCapture;
 
 @protocol FrameCaptureDelegate <NSObject>
+/// @param surfaceOwner pixelBuffer のバッキング IOSurface を保持するオブジェクト (CAMetalDrawable)。
+///   エンコード完了まで retain し続けることで Metal による IOSurface の再利用を防ぐ。
 - (void)frameCapture:(FrameCapture *)capture
     didCapturePixelBuffer:(CVPixelBufferRef)pixelBuffer
-               timestamp:(CMTime)timestamp;
+               timestamp:(CMTime)timestamp
+            surfaceOwner:(id)surfaceOwner;
 @end
 
 @interface FrameCapture : NSObject

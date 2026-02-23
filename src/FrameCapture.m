@@ -105,10 +105,13 @@ typedef IOSurfaceRef (*IOSurfaceGetter)(id, SEL);
         CMTime currentTime = CMClockMakeHostTimeFromSystemUnits(now);
         CMTime pts = self.startTimeSet ? CMTimeSubtract(currentTime, self.recordingStartTime) : kCMTimeZero;
 
-        // デリゲートに通知
-        [self.delegate frameCapture:self didCapturePixelBuffer:pixelBuffer timestamp:pts];
+        // drawable を surfaceOwner として渡し、エンコード完了まで IOSurface の再利用を防ぐ
+        [self.delegate frameCapture:self
+             didCapturePixelBuffer:pixelBuffer
+                        timestamp:pts
+                     surfaceOwner:drawable];
 
-        // 解放
+        // 解放 (デリゲート側で必要なら retain 済み)
         CVPixelBufferRelease(pixelBuffer);
     } @catch (NSException *e) {
         NSLog(@"[Recorder] captureDrawable exception: %@ %@", e.name, e.reason);

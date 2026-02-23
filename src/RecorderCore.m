@@ -248,12 +248,13 @@
 
 - (void)frameCapture:(FrameCapture *)capture
     didCapturePixelBuffer:(CVPixelBufferRef)pixelBuffer
-               timestamp:(CMTime)timestamp {
+               timestamp:(CMTime)timestamp
+            surfaceOwner:(id)surfaceOwner {
     if (!self.isRecording) return;
 
     self.videoFrameNumber++;
 
-    [self.videoEncoder encodePixelBuffer:pixelBuffer timestamp:timestamp];
+    [self.videoEncoder encodePixelBuffer:pixelBuffer timestamp:timestamp surfaceOwner:surfaceOwner];
 }
 
 #pragma mark - AudioCaptureDelegate

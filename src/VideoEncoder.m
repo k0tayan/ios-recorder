@@ -26,6 +26,11 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
                                         OSStatus status,
                                         VTEncodeInfoFlags infoFlags,
                                         CMSampleBufferRef sampleBuffer) {
+    // エンコード完了 — drawable (surfaceOwner) を解放して IOSurface を Metal に返す
+    if (sourceFrameRefCon) {
+        CFRelease(sourceFrameRefCon);
+    }
+
     if (status != noErr || !sampleBuffer) {
         NSLog(@"[Recorder] Video encode error: %d", (int)status);
         return;
@@ -144,33 +149,42 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
 }
 
 - (void)encodePixelBuffer:(CVPixelBufferRef)pixelBuffer
-                timestamp:(CMTime)timestamp {
+                timestamp:(CMTime)timestamp
+             surfaceOwner:(id)surfaceOwner {
     if (!self.isRunning || !self.session || !pixelBuffer) {
         return;
     }
 
     // ノンブロッキングのキュー深度チェック。ENCODER_QUEUE_DEPTH 未満のフレームが
     // 保留中ならセマフォは即時リターン。キュー満杯時はレンダースレッドをブロック
-    // せずフレームをドロップ — ゲームは 120fps で動き続け、IOSurface バックの
-    // pixel buffer は Metal が再利用する前にエンコードされる。
+    // せずフレームをドロップ。
     if (dispatch_semaphore_wait(self.encoderSemaphore, DISPATCH_TIME_NOW) != 0) {
-        return;  // キュー満杯 — レンダースレッドの滑らかさのためフレームをスキップ
+        return;  // キュー満杯 — フレームスキップ (surfaceOwner は ARC で自動解放)
     }
 
     CVPixelBufferRetain(pixelBuffer);
+    // surfaceOwner (drawable) を retain して sourceFrameRefCon に渡す。
+    // VT の出力コールバックで CFRelease され、drawable が Metal に返却される。
+    void *frameRefCon = surfaceOwner ? (__bridge_retained void *)surfaceOwner : NULL;
     CMTime frameDuration = CMTimeMake(1, self.fps);
     int64_t frameNum = ++self.encodeCount;
 
     dispatch_async(self.encoderQueue, ^{
         if (self.session) {
-            VTCompressionSessionEncodeFrame(self.session,
+            OSStatus st = VTCompressionSessionEncodeFrame(self.session,
                                              pixelBuffer,
                                              timestamp,
                                              frameDuration,
-                                             NULL, NULL, NULL);
+                                             NULL, frameRefCon, NULL);
+            if (st != noErr && frameRefCon) {
+                // エンコード失敗時はコールバックが呼ばれないので手動解放
+                CFRelease(frameRefCon);
+            }
             if (frameNum % 100 == 1) {
                 vreclog("VT_IN  #%lld pts=%.3f", (long long)frameNum, CMTimeGetSeconds(timestamp));
             }
+        } else if (frameRefCon) {
+            CFRelease(frameRefCon);
         }
         CVPixelBufferRelease(pixelBuffer);
         dispatch_semaphore_signal(self.encoderSemaphore);
