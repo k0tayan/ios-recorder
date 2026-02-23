@@ -299,14 +299,19 @@ static OSStatus audioConverterInputDataProc(AudioConverterRef inAudioConverter,
         UInt32 bytesToWrite = numFrames * bytesPerFrame;
         [self _writeToRingBuffer:bufferList->mBuffers[0].mData length:bytesToWrite];
     } else {
-        // 非インターリーブ: インターリーブして格納
-        UInt32 bytesPerSample = sizeof(Float32);
+        // 非インターリーブ: 一時バッファにインターリーブしてから一括書き込み
+        // (サンプルごとの _writeToRingBuffer 呼び出しを避け、境界チェックのオーバーヘッドを削減)
+        UInt32 totalBytes = numFrames * bytesPerFrame;
+        Float32 *interleaved = (Float32 *)malloc(totalBytes);
+        UInt32 channels = MIN(bufferList->mNumberBuffers, self.channels);
         for (UInt32 frame = 0; frame < numFrames; frame++) {
-            for (UInt32 ch = 0; ch < bufferList->mNumberBuffers && ch < self.channels; ch++) {
+            for (UInt32 ch = 0; ch < channels; ch++) {
                 Float32 *src = (Float32 *)bufferList->mBuffers[ch].mData;
-                [self _writeToRingBuffer:&src[frame] length:bytesPerSample];
+                interleaved[frame * channels + ch] = src[frame];
             }
         }
+        [self _writeToRingBuffer:interleaved length:totalBytes];
+        free(interleaved);
     }
 }
 
