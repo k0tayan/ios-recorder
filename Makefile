@@ -1,7 +1,11 @@
 THEOS_PACKAGE_SCHEME = rootless
 ARCHS = arm64
 TARGET = iphone:clang:16.5:15.0
-THEOS_DEVICE_IP = 192.168.1.145
+THEOS_DEVICE_IP ?= 192.168.1.145
+
+ifeq ($(DEVICE),iphone)
+  THEOS_DEVICE_IP = 192.168.1.179
+endif
 
 include $(THEOS)/makefiles/common.mk
 
@@ -14,7 +18,11 @@ iosrecorder_CFLAGS = -fobjc-arc -Isrc
 include $(THEOS_MAKE_PATH)/tweak.mk
 
 # --- Custom install targets ---
-SSH_HOST ?= ipad
+ifeq ($(DEVICE),iphone)
+  SSH_HOST ?= iphone
+else
+  SSH_HOST ?= ipad
+endif
 DEB = $(lastword $(sort $(wildcard packages/*.deb)))
 
 .PHONY: deploy remove
