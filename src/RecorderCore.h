@@ -6,6 +6,7 @@
 @interface RecorderCore : NSObject <FrameCaptureDelegate, AudioCaptureDelegate>
 
 @property (atomic, readonly) BOOL isRecording;
+@property (atomic, readonly) BOOL isStreaming;
 @property (nonatomic) int targetFPS;
 @property (nonatomic) int videoBitrate;
 @property (nonatomic) int audioBitrate;
@@ -14,6 +15,8 @@
 + (instancetype)shared;
 - (void)startRecording;
 - (void)stopRecordingWithCompletion:(void (^)(NSString *outputPath))completion;
+- (void)startStreaming;
+- (void)stopStreaming;
 - (void)forceResetRecordingState;
 - (NSDictionary *)cleanupTempFiles;
 

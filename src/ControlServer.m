@@ -182,8 +182,29 @@
         return result ?: @"ERR Unknown";
     }
 
+    if ([upperCommand isEqualToString:@"STREAM START"]) {
+        if (recorder.isStreaming) {
+            return @"ERR Already streaming";
+        }
+        [recorder startStreaming];
+        return recorder.isStreaming ? @"OK" : @"ERR Failed to start streaming";
+    }
+
+    if ([upperCommand isEqualToString:@"STREAM STOP"]) {
+        if (!recorder.isStreaming) {
+            return @"ERR Not streaming";
+        }
+        [recorder stopStreaming];
+        return @"OK";
+    }
+
     if ([upperCommand isEqualToString:@"STATUS"]) {
-        return recorder.isRecording ? @"OK recording" : @"OK idle";
+        BOOL rec = recorder.isRecording;
+        BOOL stream = recorder.isStreaming;
+        if (rec && stream) return @"OK recording+streaming";
+        if (rec) return @"OK recording";
+        if (stream) return @"OK streaming";
+        return @"OK idle";
     }
 
     if ([upperCommand isEqualToString:@"CLEANUP"]) {
