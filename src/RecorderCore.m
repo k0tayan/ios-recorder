@@ -7,7 +7,7 @@
 #import <UIKit/UIKit.h>
 
 static const uint16_t kStreamPort = 8191;
-static const int kStreamFPS = 60;
+static const int kStreamFPS = 120;
 static const int kStreamBitrate = 6000000;
 static const int kStreamWidth = 1280;
 static const int kStreamHeight = 720;
