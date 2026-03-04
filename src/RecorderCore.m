@@ -45,7 +45,7 @@ static const int kStreamHeight = 720;
         _targetFPS = 120;
         _videoBitrate = 14000000;
         _audioBitrate = 128000;
-        _maxCaptureSize = CGSizeMake(2560, 1440);
+        _maxCaptureSize = CGSizeMake(1280, 720);
         _recordingQueue = dispatch_queue_create("com.local.iosrecorder.recording", DISPATCH_QUEUE_SERIAL);
         // バックグラウンド遷移を監視 (retain cycle 回避のため __weak を使用)
         __weak typeof(self) weakSelf = self;

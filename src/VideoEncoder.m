@@ -16,6 +16,7 @@ DEFINE_RECLOG(vreclog, "iosrecorder_video.log")
     _Atomic int64_t _encodeCount;
     // VT の内部スレッドからインクリメントされるためアトミック (C 関数からアクセス)
     _Atomic int64_t _outputCount;
+    _Atomic int64_t _dropCount;
 }
 @property (nonatomic) VTCompressionSessionRef session;
 @property (nonatomic) int width;
@@ -161,6 +162,7 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
     self.isRunning = YES;
     atomic_store_explicit(&_encodeCount, 0, memory_order_relaxed);
     atomic_store_explicit(&_outputCount, 0, memory_order_relaxed);
+    atomic_store_explicit(&_dropCount, 0, memory_order_relaxed);
     vreclog("START %dx%d @%dfps %dbps", self.width, self.height, self.fps, self.bitrate);
     NSLog(@"[Recorder] VideoEncoder started: %dx%d @ %dfps, %dbps",
           self.width, self.height, self.fps, self.bitrate);
@@ -178,6 +180,10 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
     // 保留中ならセマフォは即時リターン。キュー満杯時はレンダースレッドをブロック
     // せずフレームをドロップ。
     if (dispatch_semaphore_wait(self.encoderSemaphore, DISPATCH_TIME_NOW) != 0) {
+        int64_t drops = atomic_fetch_add_explicit(&_dropCount, 1, memory_order_relaxed) + 1;
+        if (drops == 1 || drops % 30 == 0) {
+            vreclog("FRAME_DROP #%lld (queue full)", (long long)drops);
+        }
         return;  // キュー満杯 — フレームスキップ (surfaceOwner は ARC で自動解放)
     }
 
@@ -232,9 +238,10 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
         }
         int64_t submitCount = atomic_load_explicit(&self->_encodeCount, memory_order_relaxed);
         int64_t outCount = atomic_load_explicit(&self->_outputCount, memory_order_relaxed);
-        vreclog("STOP submitted=%lld encoded=%lld", (long long)submitCount, (long long)outCount);
-        NSLog(@"[Recorder] VideoEncoder stopped (submitted=%lld encoded=%lld)",
-              (long long)submitCount, (long long)outCount);
+        int64_t dropCount = atomic_load_explicit(&self->_dropCount, memory_order_relaxed);
+        vreclog("STOP submitted=%lld encoded=%lld dropped=%lld", (long long)submitCount, (long long)outCount, (long long)dropCount);
+        NSLog(@"[Recorder] VideoEncoder stopped (submitted=%lld encoded=%lld dropped=%lld)",
+              (long long)submitCount, (long long)outCount, (long long)dropCount);
         if (completion) completion();
     });
 }

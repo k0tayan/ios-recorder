@@ -14,7 +14,8 @@ static atomic_bool  sFrameRecStartTimeSet;
 
 @interface FrameCapture ()
 @property (atomic) CGSize captureSize;
-@property (nonatomic) uint64_t lastCaptureTime;
+@property (nonatomic) uint64_t nextCaptureTime;  // 次にキャプチャすべき理想時刻 (mach_absolute_time 単位)
+@property (nonatomic) double ticksPerFrame;       // 1フレームあたりの mach ticks
 @property (nonatomic) double ticksPerSecond;
 @end
 
@@ -34,13 +35,14 @@ static atomic_bool  sFrameRecStartTimeSet;
     if (self) {
         _targetFPS = 120;
         _capturing = NO;
-        _lastCaptureTime = 0;
+        _nextCaptureTime = 0;
         atomic_store_explicit(&sFrameCapturing, false, memory_order_relaxed);
         atomic_store_explicit(&sFrameRecStartTimeSet, false, memory_order_relaxed);
 
         mach_timebase_info_data_t timebase;
         mach_timebase_info(&timebase);
         _ticksPerSecond = (double)timebase.denom / (double)timebase.numer * 1e9;
+        _ticksPerFrame = _ticksPerSecond / _targetFPS;
     }
     return self;
 }
@@ -54,6 +56,8 @@ static atomic_bool  sFrameRecStartTimeSet;
 - (void)setCapturing:(BOOL)capturing {
     _capturing = capturing;
     if (capturing) {
+        _ticksPerFrame = _ticksPerSecond / _targetFPS;
+        _nextCaptureTime = 0;  // 最初のフレームで初期化される
         atomic_store_explicit(&sFrameCapturing, true, memory_order_release);
     } else {
         atomic_store_explicit(&sFrameCapturing, false, memory_order_release);
@@ -78,16 +82,30 @@ static atomic_bool  sFrameRecStartTimeSet;
         return;
     }
 
-    // フレームレート制御 (120Hz ソースから 60fps 目標で確実に
-    // 1フレームおきにキャプチャするため 0.85x 閾値を使用)
+    // フレームレート制御: 固定グリッドにスナップして等間隔キャプチャを保証。
+    // nextCaptureTime は「次にキャプチャすべき理想時刻」を表し、
+    // 実際のキャプチャ時刻ではなくグリッド上の時刻で更新することで
+    // ジッターの蓄積を防止する。
+    // PTS もグリッド時刻から算出し、再生時のフレーム間隔を完全に均一にする。
     uint64_t now = mach_absolute_time();
-    if (self.lastCaptureTime != 0) {
-        double elapsed = (double)(now - self.lastCaptureTime) / self.ticksPerSecond;
-        if (elapsed < (0.85 / self.targetFPS)) {
+    uint64_t gridTime;  // このフレームの理想的なグリッド時刻
+    if (self.nextCaptureTime != 0) {
+        if (now < self.nextCaptureTime) {
             return;
         }
+        // 大幅に遅延した場合 (2フレーム以上) はグリッドをリセット
+        uint64_t ticksPerFrame = (uint64_t)self.ticksPerFrame;
+        if (now - self.nextCaptureTime > ticksPerFrame * 2) {
+            gridTime = now;
+            self.nextCaptureTime = now + ticksPerFrame;
+        } else {
+            gridTime = self.nextCaptureTime;
+            self.nextCaptureTime += ticksPerFrame;
+        }
+    } else {
+        gridTime = now;
+        self.nextCaptureTime = now + (uint64_t)self.ticksPerFrame;
     }
-    self.lastCaptureTime = now;
 
     if (!texture) {
         return;
@@ -121,13 +139,10 @@ static atomic_bool  sFrameRecStartTimeSet;
         return;
     }
 
-    // モノトニックホストクロックから PTS を算出 (音声と同じタイムベース)。
-    // 注意: PTS は nextDrawable フック時点 (GPU レンダリング前) の時刻。
-    // IOSurface 暗黙的同期により VT は GPU 完了後の画素を読むが、PTS は
-    // レンダリング前の時刻のため 1-2 フレーム分 (8-16ms @120fps) の
-    // 系統的オフセットがある。A/V 同期に影響が出る場合は
-    // drawable.addPresentedHandler: で presentation 時刻を使うことを検討。
-    CMTime currentTime = CMClockMakeHostTimeFromSystemUnits(now);
+    // グリッド時刻から PTS を算出。実時刻 (now) ではなくグリッド時刻を使うことで、
+    // フレーム間隔が正確に 1/fps になり、再生時のジッター (カクカク) を防止する。
+    // グリッドは実時刻に追従するため A/V 同期への影響は最小。
+    CMTime currentTime = CMClockMakeHostTimeFromSystemUnits(gridTime);
     CMTime pts = atomic_load_explicit(&sFrameRecStartTimeSet, memory_order_acquire)
                ? CMTimeSubtract(currentTime, sFrameRecStartTime) : kCMTimeZero;
 

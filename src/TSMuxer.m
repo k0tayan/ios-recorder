@@ -3,7 +3,7 @@
 #import <mach/mach_time.h>
 
 // TS パケット定数
-static const int kTSPacketSize = 188;
+#define kTSPacketSize 188
 static const uint8_t kTSSyncByte = 0x47;
 
 // PID 割り当て
@@ -358,7 +358,10 @@ static uint32_t _crc32MPEG2(const uint8_t *data, size_t length) {
 
 static int64_t _cmTimeToTicks90k(CMTime time) {
     if (CMTIME_IS_INVALID(time)) return 0;
-    return (int64_t)(CMTimeGetSeconds(time) * kTimeScale90k);
+    // 整数演算で 90kHz タイムベースに変換し、浮動小数点丸め誤差を排除。
+    // CMTimeConvertScale は内部で整数除算を行うため長時間配信でも PTS がドリフトしない。
+    CMTime converted = CMTimeConvertScale(time, kTimeScale90k, kCMTimeRoundingMethod_Default);
+    return converted.value;
 }
 
 #pragma mark - PES パケット生成
@@ -369,7 +372,7 @@ static int64_t _cmTimeToTicks90k(CMTime time) {
                            esData:(NSData *)esData {
     // PES ヘッダサイズ: 3 (start code) + 1 (stream_id) + 2 (PES_packet_length)
     //                  + 3 (flags + header_data_length) + 5 (PTS)
-    static const int kPESHeaderSize = 14;
+    #define kPESHeaderSize 14
 
     size_t pesLength = kPESHeaderSize + esData.length;
     NSMutableData *pes = [NSMutableData dataWithCapacity:pesLength];
