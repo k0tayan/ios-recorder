@@ -8,6 +8,13 @@ DEFINE_RECLOG(vreclog, "iosrecorder_video.log")
 // VT 出力コールバック (drawable 解放時) でセマフォを signal することで、
 // 保持中の drawable 数を正確にこの値以下に制限する。
 // 値を 2 にすると VT 内部保持分を含め最大 2 drawable → プール枯渇しない。
+// VT 出力コールバックに渡すコンテキスト。drawable (surfaceOwner) と
+// 入力時の PTS を保持し、VT が書き換えた PTS を元の値に復元するために使う。
+typedef struct {
+    void *surfaceOwner;  // retained drawable (or NULL)
+    CMTime originalPTS;
+} FrameRefCon;
+
 #define ENCODER_QUEUE_DEPTH 2
 
 @interface VideoEncoder () {
@@ -37,30 +44,57 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
 
     // エンコード完了 — drawable (surfaceOwner) を解放して IOSurface を Metal に返し、
     // セマフォを signal して次のフレーム受付を許可する。
-    // drawable 解放とセマフォ signal を同じタイミングで行うことで、
-    // 保持中の drawable 数が ENCODER_QUEUE_DEPTH を超えないことを保証する。
-    if (sourceFrameRefCon) {
-        CFRelease(sourceFrameRefCon);
+    FrameRefCon *refCon = (FrameRefCon *)sourceFrameRefCon;
+    if (refCon) {
+        if (refCon->surfaceOwner) {
+            CFRelease(refCon->surfaceOwner);
+        }
     }
     dispatch_semaphore_signal(encoder.encoderSemaphore);
 
     if (status != noErr || !sampleBuffer) {
         NSLog(@"[Recorder] Video encode error: %d", (int)status);
+        free(refCon);
         return;
+    }
+
+    // VT が書き換えた PTS を入力時の値に復元した新しい CMSampleBuffer を作成。
+    // CMSampleBufferSetOutputPresentationTimeStamp は VT 出力バッファに対して
+    // 効果がないため、CMSampleBufferCreateCopyWithNewTiming で差し替える。
+    CMSampleBufferRef outputBuffer = sampleBuffer;
+    BOOL didCopy = NO;
+    if (refCon) {
+        CMSampleTimingInfo timing;
+        timing.presentationTimeStamp = refCon->originalPTS;
+        timing.duration = CMTimeMake(1, encoder.fps);
+        timing.decodeTimeStamp = kCMTimeInvalid;
+        CMSampleBufferRef corrected = NULL;
+        OSStatus copyStatus = CMSampleBufferCreateCopyWithNewTiming(
+            kCFAllocatorDefault, sampleBuffer, 1, &timing, &corrected);
+        if (copyStatus == noErr && corrected) {
+            outputBuffer = corrected;
+            didCopy = YES;
+        }
     }
 
     int64_t count = atomic_fetch_add_explicit(&encoder->_outputCount, 1, memory_order_relaxed) + 1;
 
     // 100 フレームごとに PTS 追跡用ログ
     if (count % 100 == 1) {
-        CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
-        vreclog("VT_OUT #%lld pts=%.3f", (long long)count, CMTimeGetSeconds(pts));
+        CMTime vtPts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
+        CMTime outPts = CMSampleBufferGetPresentationTimeStamp(outputBuffer);
+        vreclog("VT_OUT #%lld pts=%.3f vtPts=%.3f orig=%.3f copy=%d",
+                (long long)count, CMTimeGetSeconds(outPts),
+                CMTimeGetSeconds(vtPts),
+                refCon ? CMTimeGetSeconds(refCon->originalPTS) : -1.0,
+                didCopy);
     }
 
     if (encoder.onEncodedSample) {
-        // sampleBuffer はコールバック中有効。MP4Muxer 側が自身で CFRetain するため、ここでの retain/release は不要。
-        encoder.onEncodedSample(sampleBuffer);
+        encoder.onEncodedSample(outputBuffer);
     }
+    if (didCopy) CFRelease(outputBuffer);
+    free(refCon);
 }
 
 @implementation VideoEncoder
@@ -145,6 +179,13 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
 
     VTSessionSetProperty(self.session, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
 
+    // VT 内部のフレームバッファリングを禁止し、入力順に即時出力させる。
+    // これにより出力 PTS のドリフトとエンコード遅延の蓄積を防止する。
+    int maxDelay = 0;
+    CFNumberRef maxDelayRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &maxDelay);
+    VTSessionSetProperty(self.session, kVTCompressionPropertyKey_MaxFrameDelayCount, maxDelayRef);
+    CFRelease(maxDelayRef);
+
     int expectedFPS = self.fps;
     CFNumberRef fpsRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &expectedFPS);
     VTSessionSetProperty(self.session, kVTCompressionPropertyKey_ExpectedFrameRate, fpsRef);
@@ -188,9 +229,11 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
     }
 
     CVPixelBufferRetain(pixelBuffer);
-    // surfaceOwner (drawable) を retain して sourceFrameRefCon に渡す。
-    // VT の出力コールバックで CFRelease + semaphore signal され、drawable が Metal に返却される。
-    void *frameRefCon = surfaceOwner ? (__bridge_retained void *)surfaceOwner : NULL;
+    // surfaceOwner (drawable) と入力 PTS を FrameRefCon に格納して VT に渡す。
+    // 出力コールバックで drawable を解放し、PTS を復元する。
+    FrameRefCon *frameRefCon = malloc(sizeof(FrameRefCon));
+    frameRefCon->surfaceOwner = surfaceOwner ? (__bridge_retained void *)surfaceOwner : NULL;
+    frameRefCon->originalPTS = timestamp;
     CMTime frameDuration = CMTimeMake(1, self.fps);
     int64_t frameNum = atomic_fetch_add_explicit(&_encodeCount, 1, memory_order_relaxed) + 1;
 
@@ -203,7 +246,8 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
                                              NULL, frameRefCon, NULL);
             if (st != noErr) {
                 // エンコード失敗時は出力コールバックが呼ばれないので手動解放 + signal
-                if (frameRefCon) CFRelease(frameRefCon);
+                if (frameRefCon->surfaceOwner) CFRelease(frameRefCon->surfaceOwner);
+                free(frameRefCon);
                 dispatch_semaphore_signal(self.encoderSemaphore);
             }
             if (frameNum % 100 == 1) {
@@ -211,7 +255,8 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
             }
         } else {
             // セッション破棄済み — 手動解放 + signal
-            if (frameRefCon) CFRelease(frameRefCon);
+            if (frameRefCon->surfaceOwner) CFRelease(frameRefCon->surfaceOwner);
+            free(frameRefCon);
             dispatch_semaphore_signal(self.encoderSemaphore);
         }
         CVPixelBufferRelease(pixelBuffer);
