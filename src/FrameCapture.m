@@ -1,4 +1,5 @@
 #import "FrameCapture.h"
+#import "RecorderDefaults.h"
 #import <IOSurface/IOSurfaceRef.h>
 #import <mach/mach_time.h>
 #include <stdatomic.h>
@@ -45,7 +46,7 @@ typedef struct {
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _targetFPS = 120;
+        _targetFPS = kDefaultFPS;
         _capturing = NO;
         _nextCaptureTime = 0;
         atomic_store_explicit(&sFrameCapturing, false, memory_order_relaxed);

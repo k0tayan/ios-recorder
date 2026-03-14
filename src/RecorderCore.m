@@ -1,16 +1,11 @@
 #import "RecorderCore.h"
+#import "RecorderDefaults.h"
 #import "VideoEncoder.h"
 #import "AudioEncoder.h"
 #import "MP4Muxer.h"
 #import "TSMuxer.h"
 #import "StreamServer.h"
 #import <UIKit/UIKit.h>
-
-static const uint16_t kStreamPort = 8191;
-static const int kStreamFPS = 120;
-static const int kStreamBitrate = 6000000;
-static const int kStreamWidth = 1280;
-static const int kStreamHeight = 720;
 
 @interface RecorderCore ()
 @property (atomic, readwrite) BOOL isRecording;
@@ -41,10 +36,10 @@ static const int kStreamHeight = 720;
     if (self) {
         _isRecording = NO;
         _isStreaming = NO;
-        _targetFPS = 120;
-        _videoBitrate = 14000000;
-        _audioBitrate = 128000;
-        _maxCaptureSize = CGSizeMake(1280, 720);
+        _targetFPS = kDefaultFPS;
+        _videoBitrate = kDefaultVideoBitrate;
+        _audioBitrate = kDefaultAudioBitrate;
+        _maxCaptureSize = CGSizeMake(kDefaultMaxWidth, kDefaultMaxHeight);
         _recordingQueue = dispatch_queue_create("com.local.iosrecorder.recording", DISPATCH_QUEUE_SERIAL);
         // バックグラウンド遷移を監視 (retain cycle 回避のため __weak を使用)
         __weak typeof(self) weakSelf = self;
