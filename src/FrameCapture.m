@@ -1,9 +1,7 @@
 #import "FrameCapture.h"
 #import "RecorderDefaults.h"
 #import <IOSurface/IOSurfaceRef.h>
-#import <QuartzCore/CADisplayLink.h>
 #import <mach/mach_time.h>
-#import <os/lock.h>
 #include <stdatomic.h>
 
 // ObjC メッセージなしで Metal レンダリングスレッドから読めるフラグ
@@ -21,16 +19,14 @@ typedef struct {
 @interface FrameCapture () {
     DestTexCacheEntry _destTexCache[DEST_TEX_CACHE_SIZE];
     int _destTexCacheCount;
-    os_unfair_lock _latestBufferLock;
-    CVPixelBufferRef _latestPixelBuffer;   // blit 完了後に格納、displayLink が消費
 }
-@property (atomic) CGSize captureSize;
 @property (nonatomic) id<MTLCommandQueue> blitQueue;
 @property (nonatomic) CVPixelBufferPoolRef bufferPool;
 @property (nonatomic) int poolWidth;
 @property (nonatomic) int poolHeight;
-@property (nonatomic, strong) id<CAMetalDrawable> pendingDrawable;
-@property (nonatomic, strong) CADisplayLink *displayLink;
+// フレームレート制御
+@property (nonatomic) double ticksPerSecond;
+@property (nonatomic) uint64_t lastCaptureTime;       // 前回キャプチャ時の mach_absolute_time
 @end
 
 @implementation FrameCapture
@@ -49,9 +45,12 @@ typedef struct {
     if (self) {
         _targetFPS = kDefaultFPS;
         _capturing = NO;
-        _latestBufferLock = OS_UNFAIR_LOCK_INIT;
         atomic_store_explicit(&sFrameCapturing, false, memory_order_relaxed);
         atomic_store_explicit(&sFrameRecStartTimeSet, false, memory_order_relaxed);
+
+        mach_timebase_info_data_t timebase;
+        mach_timebase_info(&timebase);
+        _ticksPerSecond = (double)timebase.denom / (double)timebase.numer * 1e9;
     }
     return self;
 }
@@ -86,7 +85,7 @@ typedef struct {
 }
 
 - (void)setRecordingStartTime:(CMTime)startTime {
-    // No-op: 録画開始時刻は displayLink の最初のフレーム送信時に自動設定される。
+    // No-op: 録画開始時刻は最初のフレームキャプチャ時に自動設定される。
     (void)startTime;
 }
 
@@ -98,53 +97,26 @@ typedef struct {
     return sFrameRecStartTime;
 }
 
-- (void)setTargetFPS:(int)targetFPS {
-    _targetFPS = targetFPS;
-    // CADisplayLink のプロパティ変更はメインスレッドで行う
-    if (self.displayLink) {
-        if ([NSThread isMainThread]) {
-            self.displayLink.preferredFramesPerSecond = targetFPS;
-        } else {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                self.displayLink.preferredFramesPerSecond = targetFPS;
-            });
-        }
-    }
-}
-
 - (void)setCapturing:(BOOL)capturing {
     _capturing = capturing;
     if (capturing) {
-        self.pendingDrawable = nil;
-        os_unfair_lock_lock(&_latestBufferLock);
-        if (_latestPixelBuffer) {
-            CVPixelBufferRelease(_latestPixelBuffer);
-            _latestPixelBuffer = NULL;
-        }
-        os_unfair_lock_unlock(&_latestBufferLock);
+        self.lastCaptureTime = 0;
         atomic_store_explicit(&sFrameCapturing, true, memory_order_release);
-        [self _startDisplayLink];
     } else {
-        // sFrameCapturing を先にリセット — in-flight blit の完了ハンドラが
-        // latestPixelBuffer に書き込まないようにする
+        // in-flight の blit 完了ハンドラがフレームを配信できるよう
+        // GPU コマンドの完了を待ってから sFrameCapturing をリセットする。
+        if (self.blitQueue) {
+            id<MTLCommandBuffer> barrier = [self.blitQueue commandBuffer];
+            [barrier commit];
+            [barrier waitUntilCompleted];
+        }
         atomic_store_explicit(&sFrameCapturing, false, memory_order_release);
-        [self _stopDisplayLink];
-        // 最後の pending フレームを直接 flush
-        if (self.pendingDrawable) {
-            [self _flushPendingDrawable];
-        }
-        self.pendingDrawable = nil;
-        // 未消費の latest buffer をドレイン
-        os_unfair_lock_lock(&_latestBufferLock);
-        if (_latestPixelBuffer) {
-            CVPixelBufferRelease(_latestPixelBuffer);
-            _latestPixelBuffer = NULL;
-        }
-        os_unfair_lock_unlock(&_latestBufferLock);
         atomic_store_explicit(&sFrameRecStartTimeSet, false, memory_order_relaxed);
     }
 }
 
+/// addPresentedHandler から呼ばれる — drawable は描画・表示済み。
+/// 遅延キャプチャ不要で、フレームコンテンツの正確性が保証される。
 - (void)captureDrawable:(id<CAMetalDrawable>)drawable {
     // captureSize は録画開始前 (capturing=NO) でも常に更新する。
     // startRecording がキャプチャサイズを読み取って VideoEncoder を初期化するため、
@@ -158,78 +130,11 @@ typedef struct {
         }
     }
 
-    if (!atomic_load_explicit(&sFrameCapturing, memory_order_acquire)) {
+    if (!atomic_load_explicit(&sFrameCapturing, memory_order_acquire) || !self.delegate) {
         return;
     }
 
-    // 遅延キャプチャ: pending drawable を blit (前フレームでレンダリング完了済み)。
-    // nextDrawable 時点ではゲームが drawable にまだレンダリングしていないため、
-    // 1フレーム遅らせることで GPU レンダリングの完了を保証する。
-    // blit 結果は _latestPixelBuffer に格納され、CADisplayLink が消費する。
-    if (self.pendingDrawable) {
-        [self _blitPendingToLatest];
-    }
-
-    self.pendingDrawable = drawable;
-}
-
-#pragma mark - CADisplayLink
-
-- (void)_startDisplayLink {
-    // CADisplayLink はメインスレッドの RunLoop で動作させる。
-    // setCapturing: は recording queue から呼ばれるため dispatch する。
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!atomic_load_explicit(&sFrameCapturing, memory_order_acquire)) return;
-        self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(_displayLinkFired:)];
-        self.displayLink.preferredFramesPerSecond = self.targetFPS;
-        [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-    });
-}
-
-- (void)_stopDisplayLink {
-    // invalidate はメインスレッドで実行する必要がある。
-    // dispatch_sync で完了を待ち、後続のクリーンアップと順序を保証する。
-    if ([NSThread isMainThread]) {
-        [self.displayLink invalidate];
-        self.displayLink = nil;
-    } else {
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            [self.displayLink invalidate];
-            self.displayLink = nil;
-        });
-    }
-}
-
-- (void)_displayLinkFired:(CADisplayLink *)link {
-    if (!atomic_load_explicit(&sFrameCapturing, memory_order_acquire) || !self.delegate) return;
-
-    // blit 済みの最新フレームをアトミックに取得
-    os_unfair_lock_lock(&_latestBufferLock);
-    CVPixelBufferRef buffer = _latestPixelBuffer;
-    _latestPixelBuffer = NULL;
-    os_unfair_lock_unlock(&_latestBufferLock);
-
-    if (!buffer) return;  // ゲームがまだ新しいフレームを描画していない
-
-    // PTS: displayLink.timestamp (vsync 同期) を使い等間隔を保証する。
-    // displayLink.timestamp は CACurrentMediaTime() と同じ mach_absolute_time 由来の
-    // 秒値なので、AudioCapture が mach ticks ベースで算出する PTS との差は
-    // double→CMTime 変換の精度差のみ（実用上無視可能）。
-    CMTime currentTime = CMTimeMakeWithSeconds(link.timestamp, 1000000000);
-    CMTime pts;
-    if (!atomic_load_explicit(&sFrameRecStartTimeSet, memory_order_acquire)) {
-        sFrameRecStartTime = currentTime;
-        atomic_store_explicit(&sFrameRecStartTimeSet, true, memory_order_release);
-        pts = kCMTimeZero;
-    } else {
-        pts = CMTimeSubtract(currentTime, sFrameRecStartTime);
-    }
-
-    [self.delegate frameCapture:self
-           didCapturePixelBuffer:buffer
-                       timestamp:pts
-                    surfaceOwner:nil];
-    CVPixelBufferRelease(buffer);
+    [self _blitAndDeliverDrawable:drawable];
 }
 
 #pragma mark - Metal Blit
@@ -263,14 +168,32 @@ typedef struct {
     return tex;
 }
 
-/// 共通の blit 処理: pending drawable をプールバッファにコピーする。
-/// @return blit 先の CVPixelBufferRef (caller must release)、失敗時は NULL。
-- (CVPixelBufferRef)_blitPendingToBuffer:(id<MTLCommandBuffer> *)outCmdBuf {
-    id<CAMetalDrawable> pending = self.pendingDrawable;
-    if (!pending) return NULL;
+/// drawable を blit し、完了ハンドラからデリゲートに配信する。
+/// PTS は壁時計ベース — AudioCapture と同じタイムベースで A/V 同期を維持。
+- (void)_blitAndDeliverDrawable:(id<CAMetalDrawable>)drawable {
+    uint64_t now = mach_absolute_time();
 
-    id<MTLTexture> texture = pending.texture;
-    if (!texture) return NULL;
+    if (self.lastCaptureTime == 0) {
+        self.lastCaptureTime = now;
+        // 録画開始時刻を AudioCapture と共有
+        sFrameRecStartTime = CMClockMakeHostTimeFromSystemUnits(now);
+        atomic_store_explicit(&sFrameRecStartTimeSet, true, memory_order_release);
+    } else {
+        // レート制限: ゲーム FPS > キャプチャ FPS の場合のみ間引く。
+        // 最小間隔の 2/3 未満なら早すぎるのでスキップ。
+        double minInterval = self.ticksPerSecond / self.targetFPS;
+        if ((double)(now - self.lastCaptureTime) < minInterval * 2.0 / 3.0) {
+            return;
+        }
+        self.lastCaptureTime = now;
+    }
+
+    // PTS: 壁時計ベース — AudioCapture と同じ mach_absolute_time 由来で A/V 同期を維持。
+    CMTime currentTime = CMClockMakeHostTimeFromSystemUnits(now);
+    CMTime pts = CMTimeSubtract(currentTime, sFrameRecStartTime);
+
+    id<MTLTexture> texture = drawable.texture;
+    if (!texture) return;
 
     int tw = (int)texture.width;
     int th = (int)texture.height;
@@ -280,19 +203,19 @@ typedef struct {
     }
 
     CVPixelBufferRef poolBuffer = [self _dequeuePoolBufferWidth:tw height:th];
-    if (!poolBuffer) return NULL;
+    if (!poolBuffer) return;
 
     IOSurfaceRef destSurface = CVPixelBufferGetIOSurface(poolBuffer);
     if (!destSurface) {
         CVPixelBufferRelease(poolBuffer);
-        return NULL;
+        return;
     }
     id<MTLTexture> destTexture = [self _destTextureForSurface:destSurface
                                                        device:texture.device
                                                   pixelFormat:texture.pixelFormat];
     if (!destTexture) {
         CVPixelBufferRelease(poolBuffer);
-        return NULL;
+        return;
     }
 
     id<MTLCommandBuffer> cmdBuf = [self.blitQueue commandBuffer];
@@ -306,65 +229,25 @@ typedef struct {
         destinationOrigin:(MTLOrigin){0, 0, 0}];
     [blit endEncoding];
 
-    if (outCmdBuf) *outCmdBuf = cmdBuf;
-    return poolBuffer;
-}
-
-/// 通常パス: pending drawable を blit し、完了ハンドラで _latestPixelBuffer に格納。
-/// CADisplayLink が次の tick で消費する。
-- (void)_blitPendingToLatest {
-    id<MTLCommandBuffer> cmdBuf = nil;
-    CVPixelBufferRef poolBuffer = [self _blitPendingToBuffer:&cmdBuf];
-    if (!poolBuffer) return;
-
+    __weak typeof(self) weakSelf = self;
     [cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull cb) {
-        // キャプチャ停止後に完了した in-flight blit はバッファを解放するだけ
+        __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!atomic_load_explicit(&sFrameCapturing, memory_order_acquire)) {
             CVPixelBufferRelease(poolBuffer);
             return;
         }
-        os_unfair_lock_lock(&self->_latestBufferLock);
-        CVPixelBufferRef old = self->_latestPixelBuffer;
-        self->_latestPixelBuffer = poolBuffer;  // ownership 移譲
-        os_unfair_lock_unlock(&self->_latestBufferLock);
-        if (old) CVPixelBufferRelease(old);
+        if (strongSelf.delegate) {
+            [strongSelf.delegate frameCapture:strongSelf
+                       didCapturePixelBuffer:poolBuffer
+                                   timestamp:pts
+                                surfaceOwner:nil];
+        }
+        CVPixelBufferRelease(poolBuffer);
     }];
     [cmdBuf commit];
 }
 
-/// 停止パス: pending drawable を同期 blit し、直接デリゲートに送信する。
-- (void)_flushPendingDrawable {
-    id<MTLCommandBuffer> cmdBuf = nil;
-    CVPixelBufferRef poolBuffer = [self _blitPendingToBuffer:&cmdBuf];
-    if (!poolBuffer) return;
-
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
-
-    CMTime currentTime = CMClockGetTime(CMClockGetHostTimeClock());
-    CMTime pts;
-    if (atomic_load_explicit(&sFrameRecStartTimeSet, memory_order_acquire)) {
-        pts = CMTimeSubtract(currentTime, sFrameRecStartTime);
-    } else {
-        pts = kCMTimeZero;
-    }
-
-    if (self.delegate) {
-        [self.delegate frameCapture:self
-               didCapturePixelBuffer:poolBuffer
-                           timestamp:pts
-                        surfaceOwner:nil];
-    }
-    CVPixelBufferRelease(poolBuffer);
-}
-
 - (void)dealloc {
-    if (_displayLink) {
-        [_displayLink invalidate];
-    }
-    if (_latestPixelBuffer) {
-        CVPixelBufferRelease(_latestPixelBuffer);
-    }
     if (_bufferPool) {
         CVPixelBufferPoolRelease(_bufferPool);
     }

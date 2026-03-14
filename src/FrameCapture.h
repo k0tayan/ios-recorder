@@ -18,7 +18,7 @@
 @interface FrameCapture : NSObject
 
 @property (nonatomic, weak) id<FrameCaptureDelegate> delegate;
-@property (atomic, readonly) CGSize captureSize;
+@property (atomic) CGSize captureSize;
 @property (nonatomic) int targetFPS;
 @property (nonatomic) BOOL capturing;
 

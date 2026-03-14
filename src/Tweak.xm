@@ -8,13 +8,25 @@
 
 static ControlServer *controlServer = nil;
 
-// CAMetalLayer の nextDrawable をフックして Metal フレームをキャプチャ
+// CAMetalLayer の nextDrawable をフックし、drawable の表示完了時にキャプチャする。
+// addPresentedHandler: は drawable が画面に表示された瞬間に呼ばれるため、
+// GPU レンダリング完了が保証され、遅延キャプチャが不要になる。
 %hook CAMetalLayer
 
 - (id<CAMetalDrawable>)nextDrawable {
     id<CAMetalDrawable> drawable = %orig;
     if (drawable) {
-        [[FrameCapture shared] captureDrawable:drawable];
+        // captureSize は常に更新 (録画開始前にも必要)
+        id<MTLTexture> texture = drawable.texture;
+        if (texture) {
+            CGSize newSize = CGSizeMake(texture.width, texture.height);
+            [FrameCapture shared].captureSize = newSize;
+        }
+
+        // drawable が画面に表示されたタイミングでキャプチャ
+        [drawable addPresentedHandler:^(id<MTLDrawable> d) {
+            [[FrameCapture shared] captureDrawable:(id<CAMetalDrawable>)d];
+        }];
     }
     return drawable;
 }
