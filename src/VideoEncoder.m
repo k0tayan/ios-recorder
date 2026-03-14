@@ -61,12 +61,23 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
     // VT が書き換えた PTS を入力時の値に復元した新しい CMSampleBuffer を作成。
     // CMSampleBufferSetOutputPresentationTimeStamp は VT 出力バッファに対して
     // 効果がないため、CMSampleBufferCreateCopyWithNewTiming で差し替える。
+    //
+    // timescale=12000 に変換: AVAssetWriter はパススルーモードで最初のサンプルの
+    // timescale を mdhd に採用する。デフォルトの mach_absolute_time 由来 timescale だと
+    // AVAssetWriter が timescale=600 に量子化し、120fps (8.333ms/frame = 5/600 tick) の
+    // フレーム間隔が 4,5,6 tick の間でジッターを起こしてカクツキの原因になる。
+    // timescale=12000 なら 1 frame = 100 tick で割り切れ、stts も単一エントリになる。
     CMSampleBufferRef outputBuffer = sampleBuffer;
     BOOL didCopy = NO;
     if (refCon) {
+        // フレーム番号ベースのグリッド PTS: A/V 同期を維持しつつ完全等間隔を保証。
+        // outputCount は 0-indexed (この時点では fetch_add 前) なので count-1 がフレーム番号。
+        int64_t frameIndex = atomic_load_explicit(&encoder->_outputCount, memory_order_relaxed);
+        int32_t timescale = encoder.fps * 100;  // 120fps → 12000
+        CMTime gridPts = CMTimeMake(frameIndex * 100, timescale);
         CMSampleTimingInfo timing;
-        timing.presentationTimeStamp = refCon->originalPTS;
-        timing.duration = CMTimeMake(1, encoder.fps);
+        timing.presentationTimeStamp = gridPts;
+        timing.duration = CMTimeMake(100, timescale);
         timing.decodeTimeStamp = kCMTimeInvalid;
         CMSampleBufferRef corrected = NULL;
         OSStatus copyStatus = CMSampleBufferCreateCopyWithNewTiming(
@@ -79,15 +90,33 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
 
     int64_t count = atomic_fetch_add_explicit(&encoder->_outputCount, 1, memory_order_relaxed) + 1;
 
-    // 100 フレームごとに PTS 追跡用ログ
-    if (count % 100 == 1) {
+    // VT 出力タイミングデバッグ: 全フレームの PTS delta を記録
+    {
         CMTime vtPts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
         CMTime outPts = CMSampleBufferGetPresentationTimeStamp(outputBuffer);
-        vreclog("VT_OUT #%lld pts=%.3f vtPts=%.3f orig=%.3f copy=%d",
-                (long long)count, CMTimeGetSeconds(outPts),
-                CMTimeGetSeconds(vtPts),
-                refCon ? CMTimeGetSeconds(refCon->originalPTS) : -1.0,
-                didCopy);
+        double vtSec = CMTimeGetSeconds(vtPts);
+        double outSec = CMTimeGetSeconds(outPts);
+        double origSec = refCon ? CMTimeGetSeconds(refCon->originalPTS) : -1.0;
+        double drift = vtSec - origSec;  // VT が PTS をどれだけずらしたか
+
+        static double sPrevOutPts = -1.0;
+        static double sPrevVtPts = -1.0;
+        double outDelta = (sPrevOutPts >= 0) ? (outSec - sPrevOutPts) * 1000.0 : 0;
+        double vtDelta = (sPrevVtPts >= 0) ? (vtSec - sPrevVtPts) * 1000.0 : 0;
+        sPrevOutPts = outSec;
+        sPrevVtPts = vtSec;
+
+        // 異常検出: delta が期待値 (8.33ms) から ±4ms 以上ずれた場合、または VT drift が 1ms 以上
+        double expectedDelta = 1000.0 / encoder.fps;
+        BOOL abnormalDelta = (count > 1) && (fabs(outDelta - expectedDelta) > 4.0);
+        BOOL abnormalDrift = fabs(drift) > 0.001;
+
+        if (count <= 30 || count % 100 == 1 || abnormalDelta || abnormalDrift) {
+            vreclog("VT_OUT #%lld out=%.4f vt=%.4f orig=%.4f drift=%.4fms outΔ=%.3fms vtΔ=%.3fms%s",
+                    (long long)count, outSec, vtSec, origSec,
+                    drift * 1000.0, outDelta, vtDelta,
+                    abnormalDelta ? " !!DELTA" : (abnormalDrift ? " !!DRIFT" : ""));
+        }
     }
 
     if (encoder.onEncodedSample) {

@@ -1,5 +1,8 @@
 #import "MP4Muxer.h"
 #import <AudioToolbox/AudioToolbox.h>
+#import "RecorderLog.h"
+
+DEFINE_RECLOG(muxlog, "iosrecorder_muxer.log")
 
 @interface MP4Muxer ()
 @property (nonatomic) AVAssetWriter *writer;
@@ -16,6 +19,8 @@
 @property (nonatomic) BOOL audioInputReady;
 @property (nonatomic) int64_t videoDropCount;
 @property (nonatomic) int64_t audioDropCount;
+@property (nonatomic) int64_t videoMuxCount;
+@property (nonatomic) double prevMuxPts;
 @end
 
 @implementation MP4Muxer
@@ -36,6 +41,7 @@
         _videoInputReady = NO;
         _audioInputReady = NO;
         _muxerQueue = dispatch_queue_create("com.local.iosrecorder.muxer", DISPATCH_QUEUE_SERIAL);
+        _prevMuxPts = -1.0;
     }
     return self;
 }
@@ -140,6 +146,16 @@
         }
 
         if (self.videoInputReady && self.videoInput.isReadyForMoreMediaData) {
+            // Muxer PTS delta デバッグログ
+            self.videoMuxCount++;
+            CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
+            double ptsSec = CMTimeGetSeconds(pts);
+            double delta = (self.prevMuxPts >= 0) ? (ptsSec - self.prevMuxPts) * 1000.0 : 0;
+            self.prevMuxPts = ptsSec;
+            if (self.videoMuxCount <= 30 || self.videoMuxCount % 100 == 1 || (self.videoMuxCount > 1 && fabs(delta - 8.333) > 4.0)) {
+                muxlog("MUX_V #%lld pts=%.4f Δ=%.3fms", (long long)self.videoMuxCount, ptsSec, delta);
+            }
+
             if (![self.videoInput appendSampleBuffer:sampleBuffer]) {
                 NSLog(@"[Recorder] Failed to append video sample: %@", self.writer.error);
             }
