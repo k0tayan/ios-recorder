@@ -20,7 +20,6 @@ static const int kStreamHeight = 720;
 @property (nonatomic) MP4Muxer *muxer;
 @property (nonatomic) TSMuxer *tsMuxer;
 @property (nonatomic) StreamServer *streamServer;
-@property (nonatomic) CMTime recordingStartTime;
 @property (nonatomic) NSString *currentOutputPath;
 @property (nonatomic) id backgroundObserver;
 @property (nonatomic) dispatch_queue_t recordingQueue;  // start/stop のシリアライズ用
@@ -176,16 +175,15 @@ static const int kStreamHeight = 720;
     [self _rewireEncoderCallbacks];
 
     if (needEncoders) {
-        self.recordingStartTime = CMClockGetTime(CMClockGetHostTimeClock());
+        // 録画開始時刻は FrameCapture が最初のフレームキャプチャ時に自動設定する。
+        // AudioCapture も同じ開始時刻を共有し、A/V 同期を保つ。
 
         FrameCapture *frameCapture = [FrameCapture shared];
         frameCapture.targetFPS = self.targetFPS;
         frameCapture.delegate = self;
-        [frameCapture setRecordingStartTime:self.recordingStartTime];
         frameCapture.capturing = YES;
 
         audioCapture.delegate = self;
-        [audioCapture setRecordingStartTime:self.recordingStartTime];
         audioCapture.capturing = YES;
     }
 
@@ -278,17 +276,13 @@ static const int kStreamHeight = 720;
 
     // キャプチャが未起動の場合は起動
     if (needEncoders) {
-        self.recordingStartTime = CMClockGetTime(CMClockGetHostTimeClock());
-
         FrameCapture *frameCapture = [FrameCapture shared];
         frameCapture.targetFPS = kStreamFPS;
         frameCapture.delegate = self;
-        [frameCapture setRecordingStartTime:self.recordingStartTime];
         frameCapture.capturing = YES;
 
         AudioCapture *audioCapture = [AudioCapture shared];
         audioCapture.delegate = self;
-        [audioCapture setRecordingStartTime:self.recordingStartTime];
         audioCapture.capturing = YES;
     }
 

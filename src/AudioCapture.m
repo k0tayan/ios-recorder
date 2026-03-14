@@ -1,4 +1,5 @@
 #import "AudioCapture.h"
+#import "FrameCapture.h"
 #import "RecorderLog.h"
 #import <dlfcn.h>
 #import <substrate.h>
@@ -29,8 +30,10 @@ static atomic_int   sReadIdx;            // drain が進め、RT が空き確認
 
 // ObjC メッセージなしで RT スレッドから読めるフラグ
 static atomic_bool  sCapturing;
-static CMTime       sRecStartTime;
-static atomic_bool  sRecStartTimeSet;
+// 録画開始時刻は FrameCapture と共有 (isRecordingStartTimeSet / recordingStartTimeValue)。
+// drain スレッドは非 RT なので ObjC メッセージ送信可。
+// 一度取得した開始時刻はローカルにキャッシュし、FrameCapture が stop で
+// フラグをリセットした後も残留スロットを正しい PTS でドレインする。
 static atomic_uint  sFormatGeneration;   // AudioUnit 再構成ごとにインクリメント
 
 // AudioUnit 別の元コールバック保持 (複数フック対応)
@@ -221,6 +224,9 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
 @property (nonatomic) UInt32 currentFormatGen;  // 最後に処理したフォーマット世代
 @property (nonatomic) uint64_t drainSlotCount;   // ドレインしたスロット総数 (定期ログ用)
 @property (nonatomic) uint64_t drainFrameCount;  // ドレインしたフレーム総数
+@property (nonatomic) CMTime cachedStartTime;     // FrameCapture から取得した開始時刻のキャッシュ
+@property (nonatomic) BOOL   cachedStartTimeSet;  // キャッシュ済みフラグ
+@property (nonatomic) uint64_t skippedPreStartSlots; // 開始時刻確定前にスキップしたスロット数
 @end
 
 @implementation AudioCapture
@@ -273,10 +279,11 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
     _capturing = capturing;
 
     if (capturing) {
-        // キャプチャ有効化前にリングバッファをリセット
-        // 注意: sRecStartTimeSet はここではリセットしない — RecorderCore が
-        // キャプチャ有効化の前に録画開始時刻をセットすることで、開始時刻が
-        // セットされる前にスロットが到着するレースを回避している (PTS=0 になる問題)。
+        // キャプチャ有効化前にリングバッファとキャッシュをリセット。
+        // 録画開始時刻は FrameCapture の最初のフレームキャプチャ時に確定するため、
+        // それまでの音声スロットはスキップされる (cachedStartTimeSet == NO)。
+        self.cachedStartTimeSet = NO;
+        self.skippedPreStartSlots = 0;
         atomic_store_explicit(&sWriteIdx, 0, memory_order_relaxed);
         atomic_store_explicit(&sReadIdx,  0, memory_order_relaxed);
         atomic_store_explicit(&sCallbackCount, 0, memory_order_relaxed);
@@ -314,8 +321,11 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
 }
 
 - (void)setRecordingStartTime:(CMTime)startTime {
-    sRecStartTime = startTime;
-    atomic_store_explicit(&sRecStartTimeSet, true, memory_order_release);
+    // No-op: 録画開始時刻は FrameCapture が最初のフレームキャプチャ時に設定し、
+    // AudioCapture は FrameCapture.isRecordingStartTimeSet / recordingStartTimeValue
+    // 経由で共有する。これにより映像と音声が同一タイムベースで PTS を算出し、
+    // A/V 同期が保たれる。
+    (void)startTime;
 }
 
 - (void)updateAudioFormat {
@@ -412,11 +422,30 @@ static OSStatus hooked_AudioUnitSetProperty(AudioUnit inUnit,
         // 壁時計時刻 (コールバック時の mach_absolute_time) から PTS を算出。
         // 映像タイムベースに合わせる。slot->hostTime はスピーカー再生時刻で
         // 最大 ~1s 先にあり、音声映像のずれを引き起こす。
+        //
+        // 録画開始時刻は FrameCapture の最初のフレームで確定する。
+        // 確定前のスロットはスキップし、確定後はローカルにキャッシュして
+        // FrameCapture が stop でフラグをリセットした後も正しくドレインする。
+        if (!self.cachedStartTimeSet) {
+            if ([FrameCapture isRecordingStartTimeSet]) {
+                self.cachedStartTime = [FrameCapture recordingStartTimeValue];
+                self.cachedStartTimeSet = YES;
+                if (self.skippedPreStartSlots > 0) {
+                    reclog("PRE_START skipped %llu slots (waiting for first video frame)",
+                           (unsigned long long)self.skippedPreStartSlots);
+                }
+            } else {
+                // 映像の最初のフレームがまだ到着していない — スキップ
+                self.skippedPreStartSlots++;
+                ri = (ri + 1) % RING_SLOT_COUNT;
+                atomic_store_explicit(&sReadIdx, ri, memory_order_release);
+                continue;
+            }
+        }
         CMTime hostCMTime = CMClockMakeHostTimeFromSystemUnits(slot->captureTime);
-        CMTime pts;
-        if (atomic_load_explicit(&sRecStartTimeSet, memory_order_acquire)) {
-            pts = CMTimeSubtract(hostCMTime, sRecStartTime);
-        } else {
+        CMTime pts = CMTimeSubtract(hostCMTime, self.cachedStartTime);
+        // 最初のフレーム前に到着した音声 (極めて稀) は PTS を 0 にクランプ
+        if (CMTimeCompare(pts, kCMTimeZero) < 0) {
             pts = kCMTimeZero;
         }
 

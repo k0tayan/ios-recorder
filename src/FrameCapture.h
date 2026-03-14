@@ -26,4 +26,11 @@
 - (void)captureDrawable:(id<CAMetalDrawable>)drawable;
 - (void)setRecordingStartTime:(CMTime)startTime;
 
+/// 録画開始時刻が確定したか (最初のフレームキャプチャ時に確定)。
+/// AudioCapture が映像と同じタイムベースを共有するために使用する。
++ (BOOL)isRecordingStartTimeSet;
+
+/// 確定した録画開始時刻 (isRecordingStartTimeSet == YES の場合のみ有効)。
++ (CMTime)recordingStartTimeValue;
+
 @end

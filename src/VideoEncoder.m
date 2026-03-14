@@ -117,18 +117,41 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
 }
 
 - (BOOL)start {
+    // 低遅延レートコントロール: VT 内部バッファの保持時間を最小化し、
+    // エンコード完了→pool buffer 解放を高速化する (WWDC21 推奨)。
+    // encoderSpecification で渡す必要がある (セッションプロパティでは効かない)。
+    // デバイスが非対応の場合はフォールバックする。
+    NSDictionary *encoderSpec = @{
+        @"EnableLowLatencyRateControl": @YES,
+    };
     OSStatus status = VTCompressionSessionCreate(
         kCFAllocatorDefault,
         self.width,
         self.height,
         kCMVideoCodecType_HEVC,
-        NULL,
+        (__bridge CFDictionaryRef)encoderSpec,
         NULL,
         kCFAllocatorDefault,
         videoEncoderOutputCallback,
         (__bridge void *)self,
         &_session
     );
+
+    if (status != noErr) {
+        NSLog(@"[Recorder] Low-latency rate control not supported (%d), falling back", (int)status);
+        status = VTCompressionSessionCreate(
+            kCFAllocatorDefault,
+            self.width,
+            self.height,
+            kCMVideoCodecType_HEVC,
+            NULL,
+            NULL,
+            kCFAllocatorDefault,
+            videoEncoderOutputCallback,
+            (__bridge void *)self,
+            &_session
+        );
+    }
 
     if (status != noErr) {
         NSLog(@"[Recorder] Failed to create VTCompressionSession: %d", (int)status);

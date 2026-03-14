@@ -89,9 +89,18 @@ typedef struct {
 }
 
 - (void)setRecordingStartTime:(CMTime)startTime {
-    sFrameRecStartTime = startTime;
-    // release: startTime の書き込みが Metal スレッドの acquire 読み取りより前に可視になる
-    atomic_store_explicit(&sFrameRecStartTimeSet, true, memory_order_release);
+    // No-op: 録画開始時刻は最初のフレームキャプチャ時に自動設定される。
+    // これにより最初のフレームの PTS が常に 0 になり、
+    // 録画開始コマンドと最初のフレーム到着の間のオフセットが解消される。
+    (void)startTime;
+}
+
++ (BOOL)isRecordingStartTimeSet {
+    return atomic_load_explicit(&sFrameRecStartTimeSet, memory_order_acquire);
+}
+
++ (CMTime)recordingStartTimeValue {
+    return sFrameRecStartTime;
 }
 
 - (void)setCapturing:(BOOL)capturing {
@@ -132,28 +141,49 @@ typedef struct {
     // フレームレート制御: 固定グリッドにスナップして等間隔キャプチャを保証。
     uint64_t now = mach_absolute_time();
     uint64_t gridTime;
+    uint64_t ticksPerFrame = (uint64_t)self.ticksPerFrame;
+    uint64_t gapFillCount = 0;
+    uint64_t gapFillBase = 0;
     if (self.nextCaptureTime != 0) {
         if (now < self.nextCaptureTime) {
             return;
         }
-        uint64_t ticksPerFrame = (uint64_t)self.ticksPerFrame;
-        if (now - self.nextCaptureTime > ticksPerFrame * 2) {
-            gridTime = now;
-            self.nextCaptureTime = now + ticksPerFrame;
+        if (now - self.nextCaptureTime > ticksPerFrame + ticksPerFrame / 4) {
+            uint64_t elapsed = now - self.nextCaptureTime;
+            uint64_t skippedIntervals = elapsed / ticksPerFrame;
+            // ギャップ埋め: iOS のシステム処理等で nextDrawable が遅延した場合、
+            // スキップされたグリッド点に前フレームを複製して PTS ギャップを防ぐ。
+            // 閾値に 1/4 フレームの遊びを持たせ、微小ジッターでの誤発動を防ぐ。
+            gapFillBase = self.nextCaptureTime;
+            gapFillCount = MIN(skippedIntervals, 4);
+            gridTime = self.nextCaptureTime + skippedIntervals * ticksPerFrame;
+            self.nextCaptureTime = gridTime + ticksPerFrame;
         } else {
             gridTime = self.nextCaptureTime;
             self.nextCaptureTime += ticksPerFrame;
         }
     } else {
         gridTime = now;
-        self.nextCaptureTime = now + (uint64_t)self.ticksPerFrame;
+        self.nextCaptureTime = now + ticksPerFrame;
     }
 
-    // 遅延キャプチャ: pending drawable をblit (前フレームでレンダリング完了済み)
+    // 遅延キャプチャ: pending drawable を blit (前フレームでレンダリング完了済み)
     // nextDrawable 時点ではゲームが drawable にまだレンダリングしていないため、
     // 1フレーム遅らせることで GPU レンダリングの完了を保証する。
     if (self.pendingDrawable) {
         [self _blitPendingDrawable];
+
+        // フレームドロップ補償: スキップされたグリッド点ごとに同一フレームを
+        // 再 blit して PTS ギャップを埋める (各 blit ~0.3ms、最大 4 フレーム)。
+        if (gapFillCount > 0) {
+            NSLog(@"[Recorder] Gap fill: %llu duplicate frame(s) at %.3fs",
+                  (unsigned long long)gapFillCount,
+                  CMTimeGetSeconds(CMClockMakeHostTimeFromSystemUnits(gapFillBase)));
+        }
+        for (uint64_t i = 0; i < gapFillCount; i++) {
+            self.pendingGridTime = gapFillBase + i * ticksPerFrame;
+            [self _blitPendingDrawable];
+        }
     }
 
     // 今回の drawable と gridTime を pending に保存
@@ -233,8 +263,16 @@ typedef struct {
     [blit endEncoding];
 
     CMTime currentTime = CMClockMakeHostTimeFromSystemUnits(self.pendingGridTime);
-    CMTime pts = atomic_load_explicit(&sFrameRecStartTimeSet, memory_order_acquire)
-               ? CMTimeSubtract(currentTime, sFrameRecStartTime) : kCMTimeZero;
+    CMTime pts;
+    if (!atomic_load_explicit(&sFrameRecStartTimeSet, memory_order_acquire)) {
+        // 最初のフレーム: このフレームのグリッド時刻を録画開始時刻とし、PTS=0 を保証する。
+        // AudioCapture も同じ開始時刻を参照するため、A/V 同期が保たれる。
+        sFrameRecStartTime = currentTime;
+        atomic_store_explicit(&sFrameRecStartTimeSet, true, memory_order_release);
+        pts = kCMTimeZero;
+    } else {
+        pts = CMTimeSubtract(currentTime, sFrameRecStartTime);
+    }
 
     CMTime capturedPTS = pts;
     __weak typeof(self) weakSelf = self;

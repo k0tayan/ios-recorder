@@ -133,8 +133,9 @@
         }
 
         if (!self.sessionStarted) {
-            CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
-            [self.writer startSessionAtSourceTime:pts];
+            // 映像の最初の PTS は 0 (FrameCapture が保証) なので、
+            // セッション開始時刻も 0 にして全サンプルを含める。
+            [self.writer startSessionAtSourceTime:kCMTimeZero];
             self.sessionStarted = YES;
         }
 
@@ -160,10 +161,9 @@
             return;
         }
 
-        // 映像より先に音声が到着した場合、音声からセッション開始
+        // 映像より先に音声が到着した場合、時刻 0 からセッション開始
         if (!self.sessionStarted) {
-            CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
-            [self.writer startSessionAtSourceTime:pts];
+            [self.writer startSessionAtSourceTime:kCMTimeZero];
             self.sessionStarted = YES;
         }
 
