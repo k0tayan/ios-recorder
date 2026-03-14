@@ -5,10 +5,10 @@
 
 // 録画デフォルト
 static const int kDefaultFPS           = 120;
-static const int kDefaultVideoBitrate  = 14000000;
+static const int kDefaultVideoBitrate  = 24000000;
 static const int kDefaultAudioBitrate  = 128000;
-static const int kDefaultMaxWidth      = 1280;
-static const int kDefaultMaxHeight     = 720;
+static const int kDefaultMaxWidth      = 1920;
+static const int kDefaultMaxHeight     = 1080;
 
 // ストリーミングデフォルト
 static const uint16_t kStreamPort      = 8191;

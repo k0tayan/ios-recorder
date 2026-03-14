@@ -22,4 +22,7 @@
 ```bash
 # プロセカ起動
 ssh ipad "/var/jb/usr/bin/uiopen --bundleid com.sega.pjsekai" 2>&1
+
+# 120fps → 60fps 変換（YouTube向け、VideoToolbox HW エンコード）
+ffmpeg -i input.mp4 -vf fps=60 -c:v hevc_videotoolbox -q:v 65 -tag:v hvc1 -c:a aac -b:a 192k output_60fps.mp4
 ```
