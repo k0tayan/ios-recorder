@@ -8,7 +8,6 @@
 
 static ControlServer *controlServer = nil;
 
-// CAMetalLayer の nextDrawable をフックし、drawable の表示完了時にキャプチャする。
 // addPresentedHandler: は drawable が画面に表示された瞬間に呼ばれるため、
 // GPU レンダリング完了が保証され、遅延キャプチャが不要になる。
 %hook CAMetalLayer

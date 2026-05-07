@@ -42,8 +42,6 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
                                         CMSampleBufferRef sampleBuffer) {
     VideoEncoder *encoder = (__bridge VideoEncoder *)outputCallbackRefCon;
 
-    // エンコード完了 — drawable (surfaceOwner) を解放して IOSurface を Metal に返し、
-    // セマフォを signal して次のフレーム受付を許可する。
     FrameRefCon *refCon = (FrameRefCon *)sourceFrameRefCon;
     if (refCon) {
         if (refCon->surfaceOwner) {
@@ -281,8 +279,6 @@ static void videoEncoderOutputCallback(void *outputCallbackRefCon,
     }
 
     CVPixelBufferRetain(pixelBuffer);
-    // surfaceOwner (drawable) と入力 PTS を FrameRefCon に格納して VT に渡す。
-    // 出力コールバックで drawable を解放し、PTS を復元する。
     FrameRefCon *frameRefCon = malloc(sizeof(FrameRefCon));
     frameRefCon->surfaceOwner = surfaceOwner ? (__bridge_retained void *)surfaceOwner : NULL;
     frameRefCon->originalPTS = timestamp;
