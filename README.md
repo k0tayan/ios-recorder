@@ -13,9 +13,9 @@ Theos のビルド環境構築や SSH 接続が自力でできる程度の知識
 
 ## 注意事項
 
-- Private API の使用: `CAMetalLayer` や `AudioUnit` のフックに Substrate を使用しているため、iOS アップデートで動作しなくなる可能性がある。
-- 対象アプリへの影響: Metal のレンダリングパイプラインにフックを挿入するため、録画中はわずかにパフォーマンスが低下する可能性がある。非録画時のオーバーヘッドは最小限。
-- 本ツールの用途: 個人利用の範囲での画面録画を想定。録画した映像の利用は各アプリの利用規約に従うこと。
+- Private API の使用: `CAMetalLayer` や `AudioUnit` のフックに Substrate を使用している
+- 対象アプリへの影響: Metal のレンダリングパイプラインにフックを挿入するため、録画中はわずかにパフォーマンスが低下する可能性がある。
+- 本ツールの用途: 個人利用の範囲での画面録画を想定。
 
 ## 必要なもの
 
@@ -94,30 +94,3 @@ ffplay ウィンドウを閉じるか Ctrl+C でストリーミングは自動�
 | 音声ビットレート | 128 kbps | 128 kbps |
 | コーデック | H.265 (HEVC) / AAC | H.265 (HEVC) / AAC |
 | コンテナ | MP4 | MPEG-TS |
-
-## 構成
-
-```
-src/
-  Tweak.xm          フックのエントリポイント (CAMetalLayer, AudioUnit)
-  FrameCapture       Metal フレームキャプチャ (Metal blit → CVPixelBufferPool, addPresentedHandler 駆動)
-  AudioCapture       音声キャプチャ (AudioUnit レンダーコールバックフック, lock-free SPSC ring buffer)
-  VideoEncoder       H.265 エンコード (VideoToolbox)
-  AudioEncoder       AAC エンコード (AudioToolbox / AudioConverter)
-  MP4Muxer           MP4 多重化 (AVAssetWriter, passthrough)
-  TSMuxer            MPEG-TS 多重化 (HVCC→Annex-B, AAC→ADTS, PES/TS パケット化)
-  StreamServer       TCP ストリーミングサーバー (ポート 8191)
-  RecorderCore       全体の制御 (録画/ストリーミングのライフサイクル管理)
-  ControlServer      TCP コマンドサーバー (ポート 8190)
-
-scripts/
-  recorder_client.py 録画コントロールクライアント
-  stream_client.py   ストリーミングクライアント (ffplay 連携)
-```
-
-## 補足
-
-- アプリがバックグラウンドに遷移すると録画・ストリーミングは自動停止される
-- 録画ファイルはアプリのサンドボックス tmp に保存される。`stop` コマンド (PULL) で PC に転送後、デバイス側のファイルは自動削除される
-- `cleanup` コマンドで不要な一時ファイルを一括削除できる
-- ストリーミングサーバーは単一クライアント接続のみ対応。新しい接続があると既存の接続は切断される
